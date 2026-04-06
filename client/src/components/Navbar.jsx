@@ -5,9 +5,7 @@ export default function Navbar() {
     <nav className="navbar">
       <div className="navbar-inner">
         <Link to="/" className="navbar-logo">
-          <span>🏒</span>
-          Playoff Fantasy
-          <span className="navbar-subtitle">Hockey</span>
+          SHLOB Playoff Hockey
         </Link>
       </div>
     </nav>
