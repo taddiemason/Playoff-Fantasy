@@ -115,7 +115,7 @@ export default function AddPlayerModal({ teamId, existingPlayerIds, roster, onCl
           {error && <div className="alert alert-error">{error}</div>}
 
           <div className="search-wrapper">
-            <span className="search-icon">🔍</span>
+            <span className="search-icon"></span>
             <input
               className="form-input search-input"
               placeholder="Search player name (e.g. McDavid)..."
@@ -152,7 +152,7 @@ export default function AddPlayerModal({ teamId, existingPlayerIds, roster, onCl
                     {player.headshot
                       ? <img src={player.headshot} alt="" className="player-headshot" />
                       : <div className="player-headshot-placeholder">
-                          {pos === 'G' ? '🥅' : pos === 'D' ? '🛡️' : '🏒'}
+                          {pos}
                         </div>
                     }
                     <div className="result-info">

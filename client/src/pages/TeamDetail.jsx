@@ -4,7 +4,7 @@ import { api } from '../api.js'
 import AddPlayerModal from '../components/AddPlayerModal.jsx'
 
 const POS_LABEL = { F: 'Forwards', D: 'Defensemen', G: 'Goalies' }
-const POS_ICON = { F: '🏒', D: '🛡️', G: '🥅' }
+const POS_ICON = { F: 'F', D: 'D', G: 'G' }
 const POS_CLASS = { F: 'forwards', D: 'defense', G: 'goalies' }
 
 function PlayerRow({ player, onRemove }) {

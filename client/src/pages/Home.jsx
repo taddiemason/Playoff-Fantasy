@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
 import AddTeamModal from '../components/AddTeamModal.jsx'
 
-const MEDALS = ['🥇', '🥈', '🥉']
+const MEDALS = ['1', '2', '3']
 
 function ScoringRules() {
   const [open, setOpen] = useState(false)
@@ -106,7 +106,7 @@ export default function Home() {
 
       {error && (
         <div className="alert alert-warn" style={{ marginBottom: 16 }}>
-          ⚠ {error} — Showing roster data only. Stats will appear when playoffs begin.
+          {error} — Showing roster data only. Stats will appear when playoffs begin.
         </div>
       )}
 
@@ -117,7 +117,7 @@ export default function Home() {
         </div>
       ) : standings?.standings?.length === 0 ? (
         <div className="empty-state">
-          <div className="empty-state-icon">🏒</div>
+          <div className="empty-state-icon"></div>
           <div className="empty-state-title">No teams yet</div>
           <div className="empty-state-desc">Add your first fantasy team to get started</div>
           <button className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => setShowAddTeam(true)}>
