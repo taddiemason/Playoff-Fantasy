@@ -11,9 +11,8 @@ This project is now set up to run on Cloudflare using:
 
 ```bash
 npm install
+npm install --prefix client
 ```
-
-> Root `postinstall` also installs `client` dependencies automatically, which matches Cloudflare build behavior.
 
 ### 2) Build the frontend
 
@@ -39,13 +38,14 @@ npx wrangler d1 migrations apply playoff-fantasy-db --remote
 ### 5) Deploy
 
 ```bash
-npm run deploy:cf
+npx wrangler deploy
 ```
 
 ### Local Cloudflare dev
 
 ```bash
-npm run dev:cf
+npm run build
+npx wrangler dev
 ```
 
 This serves the built frontend and all `/api/*` endpoints through the Worker.
