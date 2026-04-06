@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { api } from '../api.js'
 
-export default function AddTeamModal({ onClose, onCreated }) {
+export default function AddTeamModal({ onClose, onCreated, onUnauthorized }) {
   const [name, setName] = useState('')
   const [owner, setOwner] = useState('')
   const [error, setError] = useState('')
@@ -16,6 +16,7 @@ export default function AddTeamModal({ onClose, onCreated }) {
       const team = await api.createTeam(name.trim(), owner.trim())
       onCreated(team)
     } catch (err) {
+      if (err.unauthorized) { onUnauthorized?.(); return }
       setError(err.message)
     } finally {
       setLoading(false)

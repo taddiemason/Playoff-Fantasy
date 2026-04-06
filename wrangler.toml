@@ -1,4 +1,4 @@
-name = "playoff-fantasy"
+name = "fantasy"
 main = "worker/index.js"
 compatibility_date = "2026-04-06"
 
@@ -10,6 +10,7 @@ binding = "ASSETS"
 binding = "DB"
 database_name = "fantasyhockey"
 database_id = "947587fd-a195-4f3a-adcc-874a9f35e906"
+migrations_dir = "migrations"
 
 [vars]
 NODE_ENV = "production"

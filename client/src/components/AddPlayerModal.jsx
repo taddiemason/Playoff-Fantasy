@@ -9,7 +9,7 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms) }
 }
 
-export default function AddPlayerModal({ teamId, existingPlayerIds, roster, onClose, onAdded }) {
+export default function AddPlayerModal({ teamId, existingPlayerIds, roster, onClose, onAdded, onUnauthorized }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
   const [searching, setSearching] = useState(false)
@@ -55,6 +55,7 @@ export default function AddPlayerModal({ teamId, existingPlayerIds, roster, onCl
       })
       onAdded(added)
     } catch (err) {
+      if (err.unauthorized) { onUnauthorized?.(); return }
       setError(err.message)
     } finally {
       setAddingId(null)
