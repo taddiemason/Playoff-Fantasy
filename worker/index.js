@@ -63,6 +63,7 @@ function requireAuth(request, env) {
 }
 
 
+function parseId(value) {
   const id = Number.parseInt(value, 10);
   return Number.isFinite(id) ? id : null;
 }
