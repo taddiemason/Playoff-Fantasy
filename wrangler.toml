@@ -9,7 +9,7 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "playoff-fantasy-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "947587fd-a195-4f3a-adcc-874a9f35e906"
 
 [vars]
 NODE_ENV = "production"
