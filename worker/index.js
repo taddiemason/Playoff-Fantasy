@@ -88,8 +88,12 @@ async function handleApi(request, env, pathname) {
         .bind(name.trim(), owner?.trim() || '')
         .first();
       return json(result);
-    } catch {
-      return json({ error: 'A team with that name already exists' }, { status: 400 });
+    } catch (err) {
+      const msg = err?.message || '';
+      if (msg.includes('UNIQUE') || msg.includes('unique')) {
+        return json({ error: 'A team with that name already exists' }, { status: 400 });
+      }
+      return json({ error: msg || 'Failed to create team' }, { status: 500 });
     }
   }
 
