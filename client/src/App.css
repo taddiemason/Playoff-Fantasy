@@ -763,7 +763,7 @@ button { cursor: pointer; font-family: inherit; }
 
 .rules-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 16px;
 }
 
@@ -798,6 +798,27 @@ button { cursor: pointer; font-family: inherit; }
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* ── Tiebreaker ─────────────────────────────────────────────────────────── */
+.tiebreaker-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.tiebreaker-label { color: var(--text-muted); white-space: nowrap; padding-top: 2px; }
+.tiebreaker-value {
+  color: var(--primary);
+  cursor: pointer;
+  font-weight: 600;
+}
+.tiebreaker-value:hover .tiebreaker-edit-hint { opacity: 1; }
+.tiebreaker-edit-hint { opacity: 0.4; font-weight: 400; font-size: 11px; transition: opacity var(--transition); }
+.tiebreaker-edit { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tiebreaker-input { width: 90px !important; padding: 4px 8px !important; font-size: 13px !important; }
+.tiebreaker-err { font-size: 11px; color: var(--red); }
 
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {

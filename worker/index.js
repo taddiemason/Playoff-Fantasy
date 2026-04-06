@@ -89,13 +89,13 @@ async function handleApi(request, env, pathname) {
 
   if (pathname === '/api/teams' && request.method === 'POST') {
     const authErr = requireAuth(request, env); if (authErr) return authErr;
-    const { name, owner } = await request.json();
+    const { name, owner, tiebreaker } = await request.json();
     if (!name?.trim()) return json({ error: 'Team name required' }, { status: 400 });
 
     try {
       const result = await db
-        .prepare('INSERT INTO teams (name, owner) VALUES (?, ?) RETURNING id, name, owner')
-        .bind(name.trim(), owner?.trim() || '')
+        .prepare('INSERT INTO teams (name, owner, tiebreaker) VALUES (?, ?, ?) RETURNING id, name, owner, tiebreaker')
+        .bind(name.trim(), owner?.trim() || '', tiebreaker?.trim() || null)
         .first();
       return json(result);
     } catch (err) {
@@ -111,13 +111,13 @@ async function handleApi(request, env, pathname) {
   if (teamMatch && request.method === 'PUT') {
     const authErr = requireAuth(request, env); if (authErr) return authErr;
     const teamId = parseId(teamMatch[1]);
-    const { name, owner } = await request.json();
+    const { name, owner, tiebreaker } = await request.json();
     if (!name?.trim()) return json({ error: 'Team name required' }, { status: 400 });
 
     try {
       await db
-        .prepare('UPDATE teams SET name = ?, owner = ? WHERE id = ?')
-        .bind(name.trim(), owner?.trim() || '', teamId)
+        .prepare('UPDATE teams SET name = ?, owner = ?, tiebreaker = ? WHERE id = ?')
+        .bind(name.trim(), owner?.trim() || '', tiebreaker?.trim() || null, teamId)
         .run();
       return json({ success: true });
     } catch {
