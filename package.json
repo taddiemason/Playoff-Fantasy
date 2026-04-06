@@ -7,7 +7,9 @@
     "start": "NODE_ENV=production node server.js",
     "dev": "concurrently \"node server.js\" \"npm run dev --prefix client\"",
     "build": "npm run build --prefix client",
-    "install:all": "npm install && npm install --prefix client"
+    "install:all": "npm install && npm install --prefix client",
+    "dev:cf": "npm run build && npx wrangler dev",
+    "deploy:cf": "npm run build && npx wrangler deploy"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
