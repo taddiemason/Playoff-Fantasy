@@ -327,6 +327,13 @@ export default {
       return handleApi(request, env, url.pathname);
     }
 
-    return env.ASSETS.fetch(request);
+    const assetResponse = await env.ASSETS.fetch(request);
+    if (assetResponse.status !== 404 && assetResponse.status !== 405) {
+      return assetResponse;
+    }
+
+    // SPA fallback so client-side routes (e.g. /teams/1) resolve to index.html
+    const spaFallbackRequest = new Request(new URL('/index.html', url), request);
+    return env.ASSETS.fetch(spaFallbackRequest);
   }
 };
