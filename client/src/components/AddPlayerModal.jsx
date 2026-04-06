@@ -55,6 +55,7 @@ export default function AddPlayerModal({ teamId, existingPlayerIds, roster, onCl
       })
       onAdded(added)
     } catch (err) {
+      if (err.unauthorized) { onClose(); throw err }
       setError(err.message)
     } finally {
       setAddingId(null)

@@ -53,7 +53,16 @@ function clearNhlCache() {
   return;
 }
 
-function parseId(value) {
+function requireAuth(request, env) {
+  const expected = env.ADMIN_PASSWORD
+  if (!expected) return null
+  const auth = request.headers.get('Authorization') || ''
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+  if (token !== expected) return json({ error: 'Unauthorized' }, { status: 401 })
+  return null
+}
+
+
   const id = Number.parseInt(value, 10);
   return Number.isFinite(id) ? id : null;
 }
@@ -79,6 +88,7 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/teams' && request.method === 'POST') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
     const { name, owner } = await request.json();
     if (!name?.trim()) return json({ error: 'Team name required' }, { status: 400 });
 
@@ -99,6 +109,7 @@ async function handleApi(request, env, pathname) {
 
   const teamMatch = pathname.match(/^\/api\/teams\/(\d+)$/);
   if (teamMatch && request.method === 'PUT') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
     const teamId = parseId(teamMatch[1]);
     const { name, owner } = await request.json();
     if (!name?.trim()) return json({ error: 'Team name required' }, { status: 400 });
@@ -115,6 +126,7 @@ async function handleApi(request, env, pathname) {
   }
 
   if (teamMatch && request.method === 'DELETE') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
     const teamId = parseId(teamMatch[1]);
     await db.prepare('DELETE FROM teams WHERE id = ?').bind(teamId).run();
     return json({ success: true });
@@ -127,6 +139,7 @@ async function handleApi(request, env, pathname) {
   }
 
   if (teamPlayersMatch && request.method === 'POST') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
     const teamId = parseId(teamPlayersMatch[1]);
     const { player_id, player_name, nhl_team, position, position_detail, headshot_url } = await request.json();
 
@@ -179,6 +192,7 @@ async function handleApi(request, env, pathname) {
 
   const removePlayerMatch = pathname.match(/^\/api\/teams\/(\d+)\/players\/(\d+)$/);
   if (removePlayerMatch && request.method === 'DELETE') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
     const teamId = parseId(removePlayerMatch[1]);
     const id = parseId(removePlayerMatch[2]);
 

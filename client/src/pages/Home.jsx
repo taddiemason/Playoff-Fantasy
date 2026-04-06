@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
 import AddTeamModal from '../components/AddTeamModal.jsx'
+import PasswordModal from '../components/PasswordModal.jsx'
 
 const MEDALS = ['1', '2', '3']
 
@@ -46,6 +47,8 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [showAddTeam, setShowAddTeam] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+  const [pendingAction, setPendingAction] = useState(null)
   const navigate = useNavigate()
 
   const fetchStandings = useCallback(async () => {
@@ -62,6 +65,13 @@ export default function Home() {
   }, [])
 
   useEffect(() => { fetchStandings() }, [fetchStandings])
+
+  function withAuth(action) {
+    setPendingAction(() => action)
+    action().catch(err => {
+      if (err.unauthorized) setShowPassword(true)
+    })
+  }
 
   async function handleRefresh() {
     setRefreshing(true)
@@ -98,7 +108,7 @@ export default function Home() {
           <button className="btn btn-ghost" onClick={handleRefresh} disabled={refreshing || loading}>
             {refreshing ? <><span className="loading-spinner"></span> Refreshing...</> : '↻ Refresh Stats'}
           </button>
-          <button className="btn btn-primary" onClick={() => setShowAddTeam(true)}>
+          <button className="btn btn-primary" onClick={() => withAuth(() => Promise.resolve(setShowAddTeam(true)))}>
             + Add Team
           </button>
         </div>
@@ -120,7 +130,7 @@ export default function Home() {
           <div className="empty-state-icon"></div>
           <div className="empty-state-title">No teams yet</div>
           <div className="empty-state-desc">Add your first fantasy team to get started</div>
-          <button className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => setShowAddTeam(true)}>
+          <button className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => withAuth(() => Promise.resolve(setShowAddTeam(true)))}>
             + Add Team
           </button>
         </div>
@@ -166,6 +176,13 @@ export default function Home() {
 
       {showAddTeam && (
         <AddTeamModal onClose={() => setShowAddTeam(false)} onCreated={handleTeamCreated} />
+      )}
+
+      {showPassword && (
+        <PasswordModal
+          onSuccess={() => { setShowPassword(false); if (pendingAction) pendingAction() }}
+          onClose={() => setShowPassword(false)}
+        />
       )}
     </div>
   )

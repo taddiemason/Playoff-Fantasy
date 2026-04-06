@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { api } from '../api.js'
 import AddPlayerModal from '../components/AddPlayerModal.jsx'
+import PasswordModal from '../components/PasswordModal.jsx'
 
 const POS_LABEL = { F: 'Forwards', D: 'Defensemen', G: 'Goalies' }
 const POS_ICON = { F: 'F', D: 'D', G: 'G' }
@@ -178,6 +179,8 @@ export default function TeamDetail() {
   const [error, setError] = useState('')
   const [showAddPlayer, setShowAddPlayer] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+  const [pendingAction, setPendingAction] = useState(null)
 
   const fetchTeam = useCallback(async () => {
     setLoading(true)
@@ -199,6 +202,13 @@ export default function TeamDetail() {
 
   useEffect(() => { fetchTeam() }, [fetchTeam])
 
+  function withAuth(action) {
+    setPendingAction(() => action)
+    action().catch(err => {
+      if (err.unauthorized) setShowPassword(true)
+    })
+  }
+
   async function handleRemovePlayer(rowId) {
     await api.removePlayer(id, rowId)
     await fetchTeam()
@@ -211,7 +221,8 @@ export default function TeamDetail() {
       await api.deleteTeam(id)
       navigate('/')
     } catch (err) {
-      setError(err.message)
+      if (err.unauthorized) { setShowPassword(true); setPendingAction(() => handleDeleteTeam) }
+      else setError(err.message)
       setDeleting(false)
     }
   }
@@ -274,7 +285,7 @@ export default function TeamDetail() {
           >
             {deleting ? 'Deleting...' : 'Delete Team'}
           </button>
-          <button className="btn btn-primary" onClick={() => setShowAddPlayer(true)}>
+          <button className="btn btn-primary" onClick={() => withAuth(() => Promise.resolve(setShowAddPlayer(true)))}>
             + Add Player
           </button>
         </div>
@@ -312,6 +323,13 @@ export default function TeamDetail() {
           roster={roster}
           onClose={() => setShowAddPlayer(false)}
           onAdded={() => { setShowAddPlayer(false); fetchTeam() }}
+        />
+      )}
+
+      {showPassword && (
+        <PasswordModal
+          onSuccess={() => { setShowPassword(false); if (pendingAction) pendingAction() }}
+          onClose={() => setShowPassword(false)}
         />
       )}
     </div>
