@@ -181,6 +181,9 @@ export default function TeamDetail() {
   const [deleting, setDeleting] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [pendingAction, setPendingAction] = useState(null)
+  const [editingTiebreaker, setEditingTiebreaker] = useState(false)
+  const [tiebreakerVal, setTiebreakerVal] = useState('')
+  const [tiebreakerErr, setTiebreakerErr] = useState('')
 
   const fetchTeam = useCallback(async () => {
     setLoading(true)
@@ -239,6 +242,29 @@ export default function TeamDetail() {
     }
   }
 
+  function startEditTiebreaker() {
+    setTiebreakerVal(teamData?.team?.tiebreaker || '')
+    setTiebreakerErr('')
+    withAuth(() => Promise.resolve(setEditingTiebreaker(true)))
+  }
+
+  async function saveTiebreaker() {
+    const val = tiebreakerVal.trim()
+    if (val && (!/^\d*\.\d{1,4}$/.test(val) || parseFloat(val) < 0 || parseFloat(val) > 1)) {
+      setTiebreakerErr('Must be a decimal between 0 and 1 with up to 4 decimal places (e.g. .9145)')
+      return
+    }
+    try {
+      const { team } = teamData
+      await api.updateTeam(id, team.name, team.owner, val || null)
+      setEditingTiebreaker(false)
+      await fetchTeam()
+    } catch (err) {
+      if (err.unauthorized) { setEditingTiebreaker(false); setShowPassword(true); setPendingAction(() => saveTiebreaker) }
+      else setTiebreakerErr(err.message)
+    }
+  }
+
   if (loading) return (
     <div className="loading-state">
       <span className="loading-spinner"></span> Loading team...
@@ -277,6 +303,29 @@ export default function TeamDetail() {
             <span className="roster-pill f">{forwards.length}/10 F</span>
             <span className="roster-pill d">{defensemen.length}/5 D</span>
             <span className="roster-pill g">{goalies.length}/3 G</span>
+          </div>
+          <div className="tiebreaker-row">
+            <span className="tiebreaker-label">Tiebreaker (Cup Goalie SV%):</span>
+            {editingTiebreaker ? (
+              <span className="tiebreaker-edit">
+                <input
+                  className="form-input tiebreaker-input"
+                  value={tiebreakerVal}
+                  onChange={e => setTiebreakerVal(e.target.value)}
+                  placeholder=".9145"
+                  maxLength={6}
+                  autoFocus
+                />
+                <button className="btn btn-primary btn-sm" onClick={saveTiebreaker}>Save</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setEditingTiebreaker(false)}>Cancel</button>
+                {tiebreakerErr && <span className="tiebreaker-err">{tiebreakerErr}</span>}
+              </span>
+            ) : (
+              <span className="tiebreaker-value" onClick={startEditTiebreaker}>
+                {team.tiebreaker || <span style={{ color: 'var(--text-dim)' }}>Not set — click to add</span>}
+                <span className="tiebreaker-edit-hint"> (edit)</span>
+              </span>
+            )}
           </div>
         </div>
         <div>

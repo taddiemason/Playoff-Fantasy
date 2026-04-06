@@ -35,6 +35,14 @@ function ScoringRules() {
               Best gets N pts, 2nd gets N-1, etc.
             </div>
           </div>
+          <div>
+            <div className="rules-col-title">Tiebreaker</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+              If two teams are tied on points, the tiebreaker is the closest guess to the
+              Stanley Cup winning goalie's total playoff save percentage (to 4 decimal places, e.g. .9145).
+              Enter your guess on your team's page.
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -170,6 +178,11 @@ export default function Home() {
                       <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>No players added</span>
                     )}
                   </div>
+                  {team.tiebreaker && (
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                      TB: {team.tiebreaker}
+                    </div>
+                  )}
                 </div>
                 <div className="team-points">
                   <div className="points-value">{team.totalPoints}</div>

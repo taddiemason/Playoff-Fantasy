@@ -1,19 +1,30 @@
 import { useState } from 'react'
 import { api } from '../api.js'
 
+function validateTiebreaker(val) {
+  if (!val.trim()) return null
+  const n = parseFloat(val)
+  if (isNaN(n) || n < 0 || n > 1) return 'Must be a decimal between 0 and 1 (e.g. .9145)'
+  if (!/^\d*\.\d{1,4}$/.test(val.trim())) return 'Must have up to 4 decimal places (e.g. .9145)'
+  return null
+}
+
 export default function AddTeamModal({ onClose, onCreated, onUnauthorized }) {
   const [name, setName] = useState('')
   const [owner, setOwner] = useState('')
+  const [tiebreaker, setTiebreaker] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   async function handleSubmit(e) {
     e.preventDefault()
     if (!name.trim()) { setError('Team name is required'); return }
+    const tbErr = validateTiebreaker(tiebreaker)
+    if (tbErr) { setError(tbErr); return }
     setLoading(true)
     setError('')
     try {
-      const team = await api.createTeam(name.trim(), owner.trim())
+      const team = await api.createTeam(name.trim(), owner.trim(), tiebreaker.trim() || null)
       onCreated(team)
     } catch (err) {
       if (err.unauthorized) { onUnauthorized?.(); return }
@@ -53,6 +64,20 @@ export default function AddTeamModal({ onClose, onCreated, onUnauthorized }) {
                 onChange={e => setOwner(e.target.value)}
                 maxLength={50}
               />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Tiebreaker — Stanley Cup Winning Goalie SV%</label>
+              <input
+                className="form-input"
+                placeholder="e.g. .9145"
+                value={tiebreaker}
+                onChange={e => setTiebreaker(e.target.value)}
+                maxLength={6}
+              />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                Guess the playoff SV% of the Stanley Cup winning goalie to 4 decimal places.
+                Used to break ties in final standings.
+              </div>
             </div>
           </div>
           <div className="modal-footer">

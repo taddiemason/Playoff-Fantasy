@@ -38,13 +38,13 @@ function mutate(url, options) {
 export const api = {
   // Teams
   getTeams: () => request('/api/teams'),
-  createTeam: (name, owner) => mutate('/api/teams', {
+  createTeam: (name, owner, tiebreaker) => mutate('/api/teams', {
     method: 'POST',
-    body: JSON.stringify({ name, owner })
+    body: JSON.stringify({ name, owner, tiebreaker })
   }),
-  updateTeam: (id, name, owner) => mutate(`/api/teams/${id}`, {
+  updateTeam: (id, name, owner, tiebreaker) => mutate(`/api/teams/${id}`, {
     method: 'PUT',
-    body: JSON.stringify({ name, owner })
+    body: JSON.stringify({ name, owner, tiebreaker })
   }),
   deleteTeam: (id) => mutate(`/api/teams/${id}`, { method: 'DELETE' }),
 
