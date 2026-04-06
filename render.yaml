@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: playoff-fantasy
+    env: node
+    buildCommand: npm install && npm install --prefix client && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+    disk:
+      name: db
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
