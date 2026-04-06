@@ -67,9 +67,16 @@ export default function Home() {
   useEffect(() => { fetchStandings() }, [fetchStandings])
 
   function withAuth(action) {
-    setPendingAction(() => action)
+    if (!localStorage.getItem('shlob_password')) {
+      setPendingAction(() => action)
+      setShowPassword(true)
+      return
+    }
     action().catch(err => {
-      if (err.unauthorized) setShowPassword(true)
+      if (err.unauthorized) {
+        setPendingAction(() => action)
+        setShowPassword(true)
+      }
     })
   }
 
@@ -175,7 +182,11 @@ export default function Home() {
       )}
 
       {showAddTeam && (
-        <AddTeamModal onClose={() => setShowAddTeam(false)} onCreated={handleTeamCreated} />
+        <AddTeamModal
+          onClose={() => setShowAddTeam(false)}
+          onCreated={handleTeamCreated}
+          onUnauthorized={() => { setShowAddTeam(false); setPendingAction(() => () => setShowAddTeam(true)); setShowPassword(true) }}
+        />
       )}
 
       {showPassword && (

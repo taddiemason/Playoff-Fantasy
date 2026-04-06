@@ -203,15 +203,27 @@ export default function TeamDetail() {
   useEffect(() => { fetchTeam() }, [fetchTeam])
 
   function withAuth(action) {
-    setPendingAction(() => action)
+    if (!localStorage.getItem('shlob_password')) {
+      setPendingAction(() => action)
+      setShowPassword(true)
+      return
+    }
     action().catch(err => {
-      if (err.unauthorized) setShowPassword(true)
+      if (err.unauthorized) {
+        setPendingAction(() => action)
+        setShowPassword(true)
+      }
     })
   }
 
   async function handleRemovePlayer(rowId) {
-    await api.removePlayer(id, rowId)
-    await fetchTeam()
+    try {
+      await api.removePlayer(id, rowId)
+      await fetchTeam()
+    } catch (err) {
+      if (err.unauthorized) { setPendingAction(() => () => handleRemovePlayer(rowId)); setShowPassword(true) }
+      else setError(err.message)
+    }
   }
 
   async function handleDeleteTeam() {
@@ -323,6 +335,7 @@ export default function TeamDetail() {
           roster={roster}
           onClose={() => setShowAddPlayer(false)}
           onAdded={() => { setShowAddPlayer(false); fetchTeam() }}
+          onUnauthorized={() => { setShowAddPlayer(false); setPendingAction(() => () => setShowAddPlayer(true)); setShowPassword(true) }}
         />
       )}
 
