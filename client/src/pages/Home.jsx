@@ -10,20 +10,15 @@ function LeagueDescription() {
   return (
     <div className="league-description">
       <p>There's still time for one more fantasy hockey league, let's run it.</p>
-      <p>
-        This is a playoff pool with <strong>NO draft</strong>. Build your roster with whoever you want,
-        but choose wisely — once a player's team is knocked out, that roster spot is dead.
-        No replacements. No resets. Same goes for injuries, suspensions, or anything else:
-        once they're done, they're done.
-      </p>
-      <p>Lineups must be locked in before puck drop of Game 1. After that, the site password gets changed and all rosters are final.</p>
-      <div className="payout-block">
-        <div className="payout-title">Payout Structure</div>
-        <div className="payout-row"><span className="payout-entries">6 or fewer entries</span><span className="payout-split">Winner takes all</span></div>
-        <div className="payout-row"><span className="payout-entries">7 or more entries</span><span className="payout-split">75% to 1st · 25% to 2nd</span></div>
-        <div className="payout-row"><span className="payout-entries">12 or more entries</span><span className="payout-split">60% to 1st · 25% to 2nd · 15% to 3rd</span></div>
-      </div>
-      <p className="league-tagline">Pick your guys. Trust your gut. Survive the chaos.<br />Let's see who actually knows playoff hockey.</p>
+      <p>This is a playoff pool with NO draft. Build your roster with whoever you want, but choose wisely, because once a player's team is knocked out, that roster spot is dead. No replacements. No resets. Same goes for injuries, suspensions, or anything else, once they're done, they're done.</p>
+      <p>Lineups must be locked in before puck drop of Game 1.</p>
+      <p>After that, the site password gets changed and all rosters are final.</p>
+      <p>Payout structure depends on total entries:</p>
+      <p>6 or fewer: Winner takes all</p>
+      <p>7 or more: 75% to 1st, 25% to 2nd</p>
+      <p>12 or more: 60% to 1st, 25% to 2nd, 15% to 3rd</p>
+      <p>Pick your guys. Trust your gut. Survive the chaos.</p>
+      <p>Let's see who actually knows playoff hockey.</p>
     </div>
   )
 }

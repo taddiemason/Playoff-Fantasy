@@ -752,60 +752,11 @@ button { cursor: pointer; font-family: inherit; }
 }
 
 .league-description p {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
 }
 
 .league-description p:last-child {
   margin-bottom: 0;
-}
-
-.league-description strong {
-  color: var(--text);
-}
-
-.payout-block {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: calc(var(--radius) - 2px);
-  padding: 14px 18px;
-  margin: 16px 0;
-}
-
-.payout-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--primary);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  margin-bottom: 10px;
-}
-
-.payout-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 13px;
-  padding: 5px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.payout-row:last-child {
-  border-bottom: none;
-}
-
-.payout-entries {
-  color: var(--text-muted);
-}
-
-.payout-split {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.league-tagline {
-  font-style: italic;
-  color: var(--text);
-  margin-top: 16px !important;
 }
 
 /* ── Scoring Rules Panel ────────────────────────────────────────────────── */
