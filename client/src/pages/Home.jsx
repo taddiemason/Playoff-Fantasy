@@ -12,7 +12,7 @@ function LeagueDescription() {
       <p>There's still time for one more fantasy hockey league, let's run it.</p>
       <p>
         This is a playoff pool with <strong>NO draft</strong>. Build your roster with whoever you want,
-        but choose wisely — once a player's team is knocked out, that roster spot is dead.
+        but choose wisely, once a player's team is knocked out, that roster spot is dead.
         No replacements. No resets. Same goes for injuries, suspensions, or anything else:
         once they're done, they're done.
       </p>
