@@ -1,4 +1,5 @@
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const nhlCache = new Map();
 
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
@@ -65,46 +66,22 @@ function normalizeGoalie(entry, playerId) {
 }
 
 async function cachedNhlFetch(cacheKey, url) {
-  const cache = caches.default;
-  const request = new Request(`https://cache.playofffantasy.internal/${cacheKey}`);
-
-  const cached = await cache.match(request);
-  if (cached) {
-    const createdAt = Number(cached.headers.get('x-created-at') || 0);
-    if (Date.now() - createdAt < CACHE_TTL_MS) {
-      return cached.json();
-    }
-  }
+  const entry = nhlCache.get(cacheKey);
+  if (entry && Date.now() - entry.time < CACHE_TTL_MS) return entry.data;
 
   const res = await fetch(url, {
     headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
   });
 
-  if (!res.ok) {
-    throw new Error(`NHL API ${res.status}: ${url}`);
-  }
+  if (!res.ok) throw new Error(`NHL API ${res.status}: ${url}`);
 
   const data = await res.json();
-  const response = json(data, {
-    headers: {
-      'cache-control': 'public, max-age=300',
-      'x-created-at': `${Date.now()}`
-    }
-  });
-
-  await cache.put(request, response.clone());
+  nhlCache.set(cacheKey, { data, time: Date.now() });
   return data;
 }
 
-async function clearNhlCache(db) {
-  const cache = caches.default;
-  const { results } = await db.prepare('SELECT DISTINCT player_id FROM team_players').all();
-
-  await Promise.all((results || []).map((row) => {
-    const playerId = row.player_id;
-    const request = new Request(`https://cache.playofffantasy.internal/player-${playerId}`);
-    return cache.delete(request);
-  }));
+function clearNhlCache() {
+  nhlCache.clear();
 }
 
 function requireAuth(request, env) {
@@ -397,7 +374,9 @@ async function handleApi(request, env, pathname) {
       });
 
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
-      return json({ standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString() });
+      const fetchedCount = Object.values(playerDataMap).filter(Boolean).length;
+      const withPlayoffData = Object.values(playerDataMap).filter(d => d && getPlayoffStats(d, season)).length;
+      return json({ standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } });
     } catch (e) {
       const teams = await getTeams(db);
       const standings = await Promise.all(
