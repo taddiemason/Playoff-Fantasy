@@ -258,7 +258,12 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/standings/refresh' && request.method === 'POST') {
-    clearNhlCache();
+    const cache = caches.default;
+    const { results: players } = await db.prepare('SELECT DISTINCT player_id FROM team_players').all();
+    await Promise.all((players || []).map(p => {
+      const req = new Request(`https://cache.playofffantasy.internal/player-${p.player_id}`);
+      return cache.delete(req);
+    }));
     return json({ success: true });
   }
 
