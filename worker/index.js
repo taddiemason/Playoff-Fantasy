@@ -262,6 +262,22 @@ async function handleApi(request, env, pathname) {
     return json({ success: true });
   }
 
+  if (pathname === '/api/debug/player' && request.method === 'GET') {
+    const url = new URL(request.url);
+    const id = url.searchParams.get('id') || '8478402';
+    const season = getCurrentSeason();
+    try {
+      const data = await fetch(`${NHL_BASE}/player/${id}/landing`, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
+      });
+      const body = await data.json();
+      const playoffEntry = getPlayoffStats(body, season);
+      return json({ status: data.status, season, playoffEntry, seasonTotalsCount: (body.seasonTotals || []).length });
+    } catch (e) {
+      return json({ error: e.message, season });
+    }
+  }
+
   if (pathname === '/api/standings' && request.method === 'GET') {
     const season = getCurrentSeason();
 
