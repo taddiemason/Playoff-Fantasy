@@ -1,4 +1,5 @@
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const nhlCache = new Map();
 
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
@@ -54,39 +55,22 @@ function normalizeGoalie(entry, playerId) {
 }
 
 async function cachedNhlFetch(cacheKey, url) {
-  const cache = caches.default;
-  const request = new Request(`https://cache.playofffantasy.internal/${cacheKey}`);
-
-  const cached = await cache.match(request);
-  if (cached) {
-    const createdAt = Number(cached.headers.get('x-created-at') || 0);
-    if (Date.now() - createdAt < CACHE_TTL_MS) {
-      return cached.json();
-    }
-  }
+  const entry = nhlCache.get(cacheKey);
+  if (entry && Date.now() - entry.time < CACHE_TTL_MS) return entry.data;
 
   const res = await fetch(url, {
     headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
   });
 
-  if (!res.ok) {
-    throw new Error(`NHL API ${res.status}: ${url}`);
-  }
+  if (!res.ok) throw new Error(`NHL API ${res.status}: ${url}`);
 
   const data = await res.json();
-  const response = json(data, {
-    headers: {
-      'cache-control': 'public, max-age=300',
-      'x-created-at': `${Date.now()}`
-    }
-  });
-
-  await cache.put(request, response.clone());
+  nhlCache.set(cacheKey, { data, time: Date.now() });
   return data;
 }
 
 function clearNhlCache() {
-  return;
+  nhlCache.clear();
 }
 
 function requireAuth(request, env) {
@@ -258,12 +242,7 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/standings/refresh' && request.method === 'POST') {
-    const cache = caches.default;
-    const { results: players } = await db.prepare('SELECT DISTINCT player_id FROM team_players').all();
-    await Promise.all((players || []).map(p => {
-      const req = new Request(`https://cache.playofffantasy.internal/player-${p.player_id}`);
-      return cache.delete(req);
-    }));
+    clearNhlCache();
     return json({ success: true });
   }
 
