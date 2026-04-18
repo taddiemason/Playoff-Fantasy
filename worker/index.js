@@ -20,9 +20,20 @@ function getCurrentSeason() {
 const NHL_BASE = 'https://api-web.nhle.com/v1';
 
 function getPlayoffStats(data, season) {
-  return (data.seasonTotals || []).find(
-    s => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3 && s.season === Number(season)
-  ) || null;
+  const seasonTotals = data?.seasonTotals || [];
+  const seasonStr = String(season);
+
+  const exactSeason = seasonTotals.find(
+    (s) => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3 && String(s.season) === seasonStr
+  );
+  if (exactSeason) return exactSeason;
+
+  // Fallback: API shape/typing can vary; use the most recent NHL playoff row if exact season is unavailable.
+  const playoffRows = seasonTotals
+    .filter((s) => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3)
+    .sort((a, b) => Number(b.season || 0) - Number(a.season || 0));
+
+  return playoffRows[0] || null;
 }
 
 function normalizeSkater(entry, playerId) {
@@ -47,8 +58,8 @@ function normalizeGoalie(entry, playerId) {
     playerId,
     wins: entry.wins ?? 0,
     shutouts: entry.shutouts ?? 0,
-    goalsAgainstAverage: entry.goalsAgainstAverage ?? null,
-    savePct: entry.savePctg ?? entry.savePct ?? null,
+    goalsAgainstAverage: entry.goalsAgainstAverage ?? entry.gaa ?? null,
+    savePct: entry.savePctg ?? entry.savePct ?? entry.savePercentage ?? null,
     gamesPlayed: entry.gamesPlayed ?? 0,
   };
 }
@@ -85,8 +96,15 @@ async function cachedNhlFetch(cacheKey, url) {
   return data;
 }
 
-function clearNhlCache() {
-  return;
+async function clearNhlCache(db) {
+  const cache = caches.default;
+  const { results } = await db.prepare('SELECT DISTINCT player_id FROM team_players').all();
+
+  await Promise.all((results || []).map((row) => {
+    const playerId = row.player_id;
+    const request = new Request(`https://cache.playofffantasy.internal/player-${playerId}`);
+    return cache.delete(request);
+  }));
 }
 
 function requireAuth(request, env) {
@@ -258,7 +276,7 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/standings/refresh' && request.method === 'POST') {
-    clearNhlCache();
+    await clearNhlCache(db);
     return json({ success: true });
   }
 
