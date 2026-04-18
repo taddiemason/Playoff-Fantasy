@@ -85,8 +85,15 @@ async function cachedNhlFetch(cacheKey, url) {
   return data;
 }
 
-function clearNhlCache() {
-  return;
+async function clearNhlCache(db) {
+  const cache = caches.default;
+  const { results } = await db.prepare('SELECT DISTINCT player_id FROM team_players').all();
+
+  await Promise.all((results || []).map((row) => {
+    const playerId = row.player_id;
+    const request = new Request(`https://cache.playofffantasy.internal/player-${playerId}`);
+    return cache.delete(request);
+  }));
 }
 
 function requireAuth(request, env) {
@@ -258,7 +265,7 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/standings/refresh' && request.method === 'POST') {
-    clearNhlCache();
+    await clearNhlCache(db);
     return json({ success: true });
   }
 
