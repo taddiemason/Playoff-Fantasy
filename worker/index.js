@@ -17,6 +17,42 @@ function getCurrentSeason() {
   return month >= 10 ? `${year}${year + 1}` : `${year - 1}${year}`;
 }
 
+const NHL_BASE = 'https://api-web.nhle.com/v1';
+
+function getPlayoffStats(data, season) {
+  return (data.seasonTotals || []).find(
+    s => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3 && s.season === Number(season)
+  ) || null;
+}
+
+function normalizeSkater(entry, playerId) {
+  if (!entry) return null;
+  return {
+    playerId,
+    goals: entry.goals ?? 0,
+    assists: entry.assists ?? 0,
+    ppGoals: entry.powerPlayGoals ?? 0,
+    ppAssists: (entry.powerPlayPoints ?? 0) - (entry.powerPlayGoals ?? 0),
+    shGoals: entry.shorthandedGoals ?? 0,
+    shAssists: (entry.shorthandedPoints ?? 0) - (entry.shorthandedGoals ?? 0),
+    penaltyMinutes: entry.pim ?? 0,
+    plusMinus: entry.plusMinus ?? 0,
+    gamesPlayed: entry.gamesPlayed ?? 0,
+  };
+}
+
+function normalizeGoalie(entry, playerId) {
+  if (!entry) return null;
+  return {
+    playerId,
+    wins: entry.wins ?? 0,
+    shutouts: entry.shutouts ?? 0,
+    goalsAgainstAverage: entry.goalsAgainstAverage ?? null,
+    savePct: entry.savePctg ?? entry.savePct ?? null,
+    gamesPlayed: entry.gamesPlayed ?? 0,
+  };
+}
+
 async function cachedNhlFetch(cacheKey, url) {
   const cache = caches.default;
   const request = new Request(`https://cache.playofffantasy.internal/${cacheKey}`);
@@ -205,16 +241,20 @@ async function handleApi(request, env, pathname) {
     const url = new URL(request.url);
     const q = url.searchParams.get('q') || '';
     if (!q.trim()) return json([]);
-
-    try {
-      const data = await fetch(
-        `https://search.d3.nhle.com/api/v1/search/player?culture=en-us&limit=20&q=${encodeURIComponent(q)}&active=true`,
-        { headers: { 'User-Agent': 'PlayoffFantasy/1.0' } }
-      ).then((r) => r.json());
-      return json(data);
-    } catch (e) {
-      return json({ error: e.message }, { status: 500 });
-    }
+    const { results } = await db
+      .prepare(
+        `SELECT DISTINCT player_id, player_name, nhl_team, position, position_detail, headshot_url
+         FROM team_players WHERE player_name LIKE ? ORDER BY player_name LIMIT 20`
+      )
+      .bind(`%${q.trim()}%`)
+      .all();
+    return json((results || []).map(p => ({
+      playerId: p.player_id,
+      name: p.player_name,
+      positionCode: p.position_detail || p.position,
+      teamAbbrev: p.nhl_team,
+      headshot: p.headshot_url || '',
+    })));
   }
 
   if (pathname === '/api/standings/refresh' && request.method === 'POST') {
@@ -226,29 +266,43 @@ async function handleApi(request, env, pathname) {
     const season = getCurrentSeason();
 
     try {
-      const skaterExp = encodeURIComponent(`gameTypeId=3 and seasonId=${season}`);
-      const goalieExp = encodeURIComponent(`gameTypeId=3 and seasonId=${season}`);
-
-      const [skaterData, goalieData] = await Promise.all([
-        cachedNhlFetch(
-          `skaters-${season}`,
-          `https://api.nhle.com/stats/rest/en/skater/summary?cayenneExp=${skaterExp}&sort=points&start=0&limit=500`
-        ),
-        cachedNhlFetch(
-          `goalies-${season}`,
-          `https://api.nhle.com/stats/rest/en/goalie/summary?cayenneExp=${goalieExp}&sort=wins&start=0&limit=200`
-        )
-      ]);
-
-      const skaterStats = skaterData.data || [];
-      const goalieStats = goalieData.data || [];
-      const skaterMap = Object.fromEntries(skaterStats.map((s) => [s.playerId, s]));
-      const goalieMap = Object.fromEntries(goalieStats.map((g) => [g.playerId, g]));
-
       const teams = await getTeams(db);
       const teamsWithPlayers = await Promise.all(
         teams.map(async (team) => ({ ...team, players: await getTeamPlayers(db, team.id) }))
       );
+
+      // Fetch all unique player landing pages in parallel
+      const allPlayerIds = [...new Set(
+        teamsWithPlayers.flatMap(t => t.players.map(p => p.player_id))
+      )];
+      const playerEntries = await Promise.all(
+        allPlayerIds.map(async id => {
+          try {
+            const data = await cachedNhlFetch(`player-${id}`, `${NHL_BASE}/player/${id}/landing`);
+            return [id, data];
+          } catch {
+            return [id, null];
+          }
+        })
+      );
+      const playerDataMap = Object.fromEntries(playerEntries);
+
+      // Build normalized stat maps keyed by player_id
+      const skaterMap = {};
+      const goalieMap = {};
+      for (const team of teamsWithPlayers) {
+        for (const p of team.players) {
+          if (p.player_id in skaterMap || p.player_id in goalieMap) continue;
+          const entry = playerDataMap[p.player_id]
+            ? getPlayoffStats(playerDataMap[p.player_id], season)
+            : null;
+          if (p.position === 'G') {
+            goalieMap[p.player_id] = normalizeGoalie(entry, p.player_id);
+          } else {
+            skaterMap[p.player_id] = normalizeSkater(entry, p.player_id);
+          }
+        }
+      }
 
       const allGoalieIds = [
         ...new Set(
