@@ -1,5 +1,5 @@
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const nhlCache = new Map();
+const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh
 
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
