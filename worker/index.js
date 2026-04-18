@@ -363,7 +363,9 @@ async function handleApi(request, env, pathname) {
       });
 
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
-      return json({ standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString() });
+      const fetchedCount = Object.values(playerDataMap).filter(Boolean).length;
+      const withPlayoffData = Object.values(playerDataMap).filter(d => d && getPlayoffStats(d, season)).length;
+      return json({ standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } });
     } catch (e) {
       const teams = await getTeams(db);
       const standings = await Promise.all(
