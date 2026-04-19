@@ -87,13 +87,32 @@ function normalizeSkater(entry, playerId) {
   };
 }
 
+function toiToSeconds(toi) {
+  if (toi == null) return null;
+  if (typeof toi === 'number') return toi;
+  if (toi.includes(':')) {
+    const [mm, ss] = toi.split(':');
+    return parseInt(mm) * 60 + parseInt(ss || '0');
+  }
+  return parseFloat(toi) || null;
+}
+
 function normalizeGoalie(entry, playerId) {
   if (!entry) return null;
+  let goalsAgainstAverage = entry.goalsAgainstAvg ?? entry.goalsAgainstAverage ?? entry.gaa ?? null;
+  if (goalsAgainstAverage == null && entry.goalsAgainst != null) {
+    const toiSec = toiToSeconds(entry.timeOnIce);
+    if (toiSec > 0) {
+      goalsAgainstAverage = (entry.goalsAgainst / toiSec) * 3600;
+    } else if (entry.gamesPlayed > 0) {
+      goalsAgainstAverage = entry.goalsAgainst / entry.gamesPlayed;
+    }
+  }
   return {
     playerId,
     wins: entry.wins ?? 0,
     shutouts: entry.shutouts ?? 0,
-    goalsAgainstAverage: entry.goalsAgainstAverage ?? entry.gaa ?? null,
+    goalsAgainstAverage,
     savePct: entry.savePctg ?? entry.savePct ?? entry.savePercentage ?? null,
     gamesPlayed: entry.gamesPlayed ?? 0,
   };
@@ -261,6 +280,19 @@ app.get('/api/standings', async (req, res) => {
         }
       }
     }
+
+    // Fetch GAA from dedicated playoff leaders endpoint — seasonTotals omits goalsAgainstAvg
+    try {
+      const gaaLeaders = await cachedFetch(
+        `goalie-gaa-${season}`,
+        `${NHL_BASE}/goalie-stats-leaders/${season}/3?categories=goalsAgainstAvg&limit=500`
+      );
+      for (const g of (gaaLeaders?.goalsAgainstAvg || [])) {
+        if (g.id != null && g.value != null && goalieMap[g.id] && goalieMap[g.id].goalsAgainstAverage == null) {
+          goalieMap[g.id] = { ...goalieMap[g.id], goalsAgainstAverage: g.value };
+        }
+      }
+    } catch {}
 
     // Pool all unique goalies from all fantasy teams for GAA/SV% ranking
     const allGoalieIds = [...new Set(
