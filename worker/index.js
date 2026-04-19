@@ -323,6 +323,19 @@ async function handleApi(request, env, pathname) {
         }
       }
 
+      // Fetch GAA from dedicated playoff leaders endpoint — seasonTotals omits goalsAgainstAvg
+      try {
+        const gaaLeaders = await cachedNhlFetch(
+          `goalie-gaa-${season}`,
+          `${NHL_BASE}/goalie-stats-leaders/${season}/3?categories=goalsAgainstAvg&limit=500`
+        );
+        for (const g of (gaaLeaders?.goalsAgainstAvg || [])) {
+          if (g.id != null && g.value != null && goalieMap[g.id] && goalieMap[g.id].goalsAgainstAverage == null) {
+            goalieMap[g.id] = { ...goalieMap[g.id], goalsAgainstAverage: g.value };
+          }
+        }
+      } catch {}
+
       const allGoalieIds = [
         ...new Set(
           teamsWithPlayers.flatMap((t) => t.players.filter((p) => p.position === 'G').map((p) => p.player_id))
