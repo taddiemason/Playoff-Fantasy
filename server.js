@@ -93,8 +93,8 @@ function normalizeGoalie(entry, playerId) {
     playerId,
     wins: entry.wins ?? 0,
     shutouts: entry.shutouts ?? 0,
-    goalsAgainstAverage: entry.goalsAgainstAverage ?? null,
-    savePct: entry.savePctg ?? entry.savePct ?? null,
+    goalsAgainstAverage: entry.goalsAgainstAverage ?? entry.gaa ?? null,
+    savePct: entry.savePctg ?? entry.savePct ?? entry.savePercentage ?? null,
     gamesPlayed: entry.gamesPlayed ?? 0,
   };
 }
