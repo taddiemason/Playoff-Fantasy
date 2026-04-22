@@ -118,6 +118,34 @@ function normalizeGoalie(entry, playerId) {
   };
 }
 
+function buildRankMap(goalies, accessor, direction = 'desc') {
+  const sorted = [...goalies].sort((a, b) => {
+    const aValue = accessor(a);
+    const bValue = accessor(b);
+    const diff = direction === 'asc' ? aValue - bValue : bValue - aValue;
+    if (diff !== 0) return diff;
+    // Keep ties deterministic so refreshes can't reshuffle points
+    return a.playerId - b.playerId;
+  });
+
+  const n = sorted.length;
+  const ranks = {};
+  let pointsAtIndex = n;
+
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0) {
+      const prev = accessor(sorted[i - 1]);
+      const current = accessor(sorted[i]);
+      if (current !== prev) {
+        pointsAtIndex = n - i;
+      }
+    }
+    ranks[sorted[i].playerId] = pointsAtIndex;
+  }
+
+  return ranks;
+}
+
 app.use(express.json());
 
 if (process.env.NODE_ENV === 'production') {
@@ -302,11 +330,8 @@ app.get('/api/standings', async (req, res) => {
 
     // Rank by GAA ascending (lower is better) and SV% descending (higher is better)
     const n = poolGoalies.length;
-    const sortedByGAA = [...poolGoalies].sort((a, b) => (a.goalsAgainstAverage ?? 99) - (b.goalsAgainstAverage ?? 99));
-    const sortedBySVP = [...poolGoalies].sort((a, b) => (b.savePct ?? 0) - (a.savePct ?? 0));
-
-    const gaaRankMap = Object.fromEntries(sortedByGAA.map((g, i) => [g.playerId, n - i]));
-    const svpRankMap = Object.fromEntries(sortedBySVP.map((g, i) => [g.playerId, n - i]));
+    const gaaRankMap = buildRankMap(poolGoalies, g => g.goalsAgainstAverage ?? 99, 'asc');
+    const svpRankMap = buildRankMap(poolGoalies, g => g.savePct ?? 0, 'desc');
 
     // Calculate fantasy points per team
     const standings = teamsWithPlayers.map(team => {
