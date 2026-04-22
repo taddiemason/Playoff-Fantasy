@@ -39,6 +39,11 @@ db.exec(`
 const cache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
 
+// Tracks goalies that have ever had gamesPlayed > 0. Once a goalie is confirmed
+// active they stay in the ranking pool even if a transient NHL API response
+// comes back without their playoff entry, preventing repeated rank shifts.
+const confirmedActiveGoalies = new Map(); // playerId → last known normalized stats
+
 async function cachedFetch(key, url) {
   const entry = cache.get(key);
   if (entry && Date.now() - entry.time < CACHE_TTL) return entry.data;
@@ -311,7 +316,18 @@ app.get('/api/standings', async (req, res) => {
     // n is fixed to the total roster size so ranking points don't shift when
     // individual API calls fail or a goalie hasn't played yet this refresh.
     const n = allGoalieIds.length;
-    const poolGoalies = allGoalieIds.map(id => goalieMap[id]).filter(g => g && g.gamesPlayed > 0);
+
+    // Update the confirmed-active registry with any new data, then build the
+    // pool from it. This prevents a goalie from leaving the pool when a
+    // transient NHL API response comes back without their playoff entry.
+    for (const id of allGoalieIds) {
+      const g = goalieMap[id];
+      if (g && g.gamesPlayed > 0) confirmedActiveGoalies.set(id, g);
+    }
+    const poolGoalies = allGoalieIds
+      .filter(id => confirmedActiveGoalies.has(id))
+      .map(id => goalieMap[id] ?? confirmedActiveGoalies.get(id))
+      .filter(g => g);
 
     // Rank by GAA ascending (lower is better) and SV% descending (higher is better)
     const sortedByGAA = [...poolGoalies].sort((a, b) => (a.goalsAgainstAverage ?? 99) - (b.goalsAgainstAverage ?? 99));
