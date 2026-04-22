@@ -298,10 +298,12 @@ app.get('/api/standings', async (req, res) => {
     const allGoalieIds = [...new Set(
       teamsWithPlayers.flatMap(t => t.players.filter(p => p.position === 'G').map(p => p.player_id))
     )];
+    // n is fixed to the total roster size so ranking points don't shift when
+    // individual API calls fail or a goalie hasn't played yet this refresh.
+    const n = allGoalieIds.length;
     const poolGoalies = allGoalieIds.map(id => goalieMap[id]).filter(g => g && g.gamesPlayed > 0);
 
     // Rank by GAA ascending (lower is better) and SV% descending (higher is better)
-    const n = poolGoalies.length;
     const sortedByGAA = [...poolGoalies].sort((a, b) => (a.goalsAgainstAverage ?? 99) - (b.goalsAgainstAverage ?? 99));
     const sortedBySVP = [...poolGoalies].sort((a, b) => (b.savePct ?? 0) - (a.savePct ?? 0));
 
