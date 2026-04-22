@@ -133,6 +133,34 @@ function normalizeGoalie(entry, playerId) {
   };
 }
 
+function buildRankMap(goalies, accessor, direction = 'desc') {
+  const sorted = [...goalies].sort((a, b) => {
+    const aValue = accessor(a);
+    const bValue = accessor(b);
+    const diff = direction === 'asc' ? aValue - bValue : bValue - aValue;
+    if (diff !== 0) return diff;
+    // Keep ties deterministic so refreshes can't reshuffle points
+    return a.playerId - b.playerId;
+  });
+
+  const n = sorted.length;
+  const ranks = {};
+  let pointsAtIndex = n;
+
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0) {
+      const prev = accessor(sorted[i - 1]);
+      const current = accessor(sorted[i]);
+      if (current !== prev) {
+        pointsAtIndex = n - i;
+      }
+    }
+    ranks[sorted[i].playerId] = pointsAtIndex;
+  }
+
+  return ranks;
+}
+
 app.use(express.json());
 
 if (process.env.NODE_ENV === 'production') {
