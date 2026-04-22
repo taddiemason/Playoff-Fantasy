@@ -42,17 +42,27 @@ const CACHE_TTL = 5 * 60 * 1000;
 async function cachedFetch(key, url) {
   const entry = cache.get(key);
   if (entry && Date.now() - entry.time < CACHE_TTL) return entry.data;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'PlayoffFantasy/1.0 (github.com/Zmalski/NHL-API-Reference)' }
-  });
-  if (!res.ok) throw new Error(`NHL API ${res.status}: ${url}`);
-  const data = await res.json();
-  cache.set(key, { data, time: Date.now() });
-  return data;
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'PlayoffFantasy/1.0 (github.com/Zmalski/NHL-API-Reference)' }
+    });
+    if (!res.ok) throw new Error(`NHL API ${res.status}: ${url}`);
+    const data = await res.json();
+    cache.set(key, { data, time: Date.now() });
+    return data;
+  } catch (err) {
+    // Return stale data rather than dropping the player to 0 points
+    if (entry) return entry.data;
+    throw err;
+  }
 }
 
 function clearCache() {
-  cache.clear();
+  // Mark entries stale so fresh data is fetched, but keep values as fallback
+  // in case the NHL API is temporarily unreachable.
+  for (const [key, entry] of cache.entries()) {
+    cache.set(key, { ...entry, time: 0 });
+  }
 }
 
 function getCurrentSeason() {

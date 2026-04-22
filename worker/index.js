@@ -77,19 +77,29 @@ async function cachedNhlFetch(cacheKey, url) {
   const entry = nhlCache.get(cacheKey);
   if (entry && Date.now() - entry.time < CACHE_TTL_MS) return entry.data;
 
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
-  });
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
+    });
 
-  if (!res.ok) throw new Error(`NHL API ${res.status}: ${url}`);
+    if (!res.ok) throw new Error(`NHL API ${res.status}: ${url}`);
 
-  const data = await res.json();
-  nhlCache.set(cacheKey, { data, time: Date.now() });
-  return data;
+    const data = await res.json();
+    nhlCache.set(cacheKey, { data, time: Date.now() });
+    return data;
+  } catch (err) {
+    // Return stale data rather than dropping the player to 0 points
+    if (entry) return entry.data;
+    throw err;
+  }
 }
 
 function clearNhlCache() {
-  nhlCache.clear();
+  // Mark entries stale so fresh data is fetched, but keep values as fallback
+  // in case the NHL API is temporarily unreachable.
+  for (const [key, entry] of nhlCache.entries()) {
+    nhlCache.set(key, { ...entry, time: 0 });
+  }
 }
 
 function requireAuth(request, env) {
