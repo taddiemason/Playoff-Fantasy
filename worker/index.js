@@ -324,6 +324,20 @@ async function handleApi(request, env, pathname) {
     return json({ success: true });
   }
 
+  if (pathname === '/api/debug/bracket' && request.method === 'GET') {
+    const season = getCurrentSeason();
+    try {
+      const res = await fetch(`${NHL_BASE}/playoff-bracket/${season}`, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
+      });
+      const body = await res.json();
+      const eliminatedTeams = await getEliminatedTeams(season);
+      return json({ status: res.status, season, eliminatedTeams, rawBracket: body });
+    } catch (e) {
+      return json({ error: e.message, season });
+    }
+  }
+
   if (pathname === '/api/debug/player' && request.method === 'GET') {
     const url = new URL(request.url);
     const id = url.searchParams.get('id') || '8478402';
