@@ -73,6 +73,25 @@ function clearCache() {
   }
 }
 
+async function getEliminatedTeams(season) {
+  try {
+    const data = await cachedFetch(`bracket-${season}`, `${NHL_BASE}/playoff-bracket/${season}`);
+    const eliminated = new Set();
+    for (const round of (data?.rounds || [])) {
+      for (const series of (round?.series || [])) {
+        const top = series.topSeedTeam;
+        const bottom = series.bottomSeedTeam;
+        if (!top || !bottom) continue;
+        if ((top.wins ?? 0) >= 4) eliminated.add(bottom.abbrev);
+        else if ((bottom.wins ?? 0) >= 4) eliminated.add(top.abbrev);
+      }
+    }
+    return [...eliminated];
+  } catch {
+    return [];
+  }
+}
+
 function getCurrentSeason() {
   const now = new Date();
   const year = now.getFullYear();
@@ -407,7 +426,8 @@ app.get('/api/standings', async (req, res) => {
     });
 
     standings.sort((a, b) => b.totalPoints - a.totalPoints);
-    const result = { standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString() };
+    const eliminatedTeams = await getEliminatedTeams(season);
+    const result = { standings, season, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString() };
     lastSuccessfulStandings = result;
     res.json(result);
   } catch (e) {

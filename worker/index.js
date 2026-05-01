@@ -108,6 +108,25 @@ function clearNhlCache() {
   }
 }
 
+async function getEliminatedTeams(season) {
+  try {
+    const data = await cachedNhlFetch(`bracket-${season}`, `${NHL_BASE}/playoff-bracket/${season}`);
+    const eliminated = new Set();
+    for (const round of (data?.rounds || [])) {
+      for (const series of (round?.series || [])) {
+        const top = series.topSeedTeam;
+        const bottom = series.bottomSeedTeam;
+        if (!top || !bottom) continue;
+        if ((top.wins ?? 0) >= 4) eliminated.add(bottom.abbrev);
+        else if ((bottom.wins ?? 0) >= 4) eliminated.add(top.abbrev);
+      }
+    }
+    return [...eliminated];
+  } catch {
+    return [];
+  }
+}
+
 function requireAuth(request, env) {
   const expected = env.ADMIN_PASSWORD
   if (!expected) return null
@@ -423,9 +442,10 @@ async function handleApi(request, env, pathname) {
       });
 
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
+      const eliminatedTeams = await getEliminatedTeams(season);
       const fetchedCount = Object.values(playerDataMap).filter(Boolean).length;
       const withPlayoffData = Object.values(playerDataMap).filter(d => d && getPlayoffStats(d, season)).length;
-      const result = { standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } };
+      const result = { standings, season, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } };
       lastSuccessfulStandings = result;
       return json(result);
     } catch (e) {
