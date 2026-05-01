@@ -1,4 +1,5 @@
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const STATS_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh
 let lastSuccessfulStandings = null;
 
@@ -153,6 +154,29 @@ async function getTeamPlayers(db, teamId) {
     .bind(teamId)
     .all();
   return results || [];
+}
+
+async function getPlayerSnapshotMap(db, season, playerIds) {
+  if (!playerIds.length) return {};
+  const placeholders = playerIds.map(() => '?').join(',');
+  const { results } = await db
+    .prepare(
+      `SELECT player_id, stats_json, fetched_at
+       FROM player_stats_snapshots
+       WHERE season = ? AND player_id IN (${placeholders})`
+    )
+    .bind(season, ...playerIds)
+    .all();
+
+  return Object.fromEntries(
+    (results || []).map((row) => [row.player_id, row])
+  );
+}
+
+function isSnapshotFresh(fetchedAt, ttlMs = STATS_SNAPSHOT_TTL_MS) {
+  if (!fetchedAt) return false;
+  const ts = new Date(fetchedAt).getTime();
+  return Number.isFinite(ts) && (Date.now() - ts) < ttlMs;
 }
 
 async function handleApi(request, env, pathname) {
@@ -329,17 +353,37 @@ async function handleApi(request, env, pathname) {
       const allPlayerIds = [...new Set(
         teamsWithPlayers.flatMap(t => t.players.map(p => p.player_id))
       )];
-      const playerEntries = await Promise.all(
-        allPlayerIds.map(async id => {
+      const snapshotMap = await getPlayerSnapshotMap(db, season, allPlayerIds);
+      const staleOrMissingIds = allPlayerIds.filter((id) => !isSnapshotFresh(snapshotMap[id]?.fetched_at));
+      const fetchedEntries = await Promise.all(
+        staleOrMissingIds.map(async id => {
           try {
             const data = await cachedNhlFetch(`player-${id}`, `${NHL_BASE}/player/${id}/landing`);
-            return [id, data];
+            const playoffStats = getPlayoffStats(data, season);
+            await db
+              .prepare(
+                `INSERT INTO player_stats_snapshots (player_id, season, stats_json, fetched_at)
+                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(player_id, season) DO UPDATE SET
+                   stats_json = excluded.stats_json,
+                   fetched_at = CURRENT_TIMESTAMP`
+              )
+              .bind(id, season, JSON.stringify(playoffStats))
+              .run();
+            return [id, playoffStats];
           } catch {
             return [id, null];
           }
         })
       );
-      const playerDataMap = Object.fromEntries(playerEntries);
+      const fetchedStatsMap = Object.fromEntries(fetchedEntries);
+      const playerDataMap = Object.fromEntries(
+        allPlayerIds.map((id) => {
+          const cached = snapshotMap[id]?.stats_json ? JSON.parse(snapshotMap[id].stats_json) : null;
+          const latest = Object.prototype.hasOwnProperty.call(fetchedStatsMap, id) ? fetchedStatsMap[id] : cached;
+          return [id, latest];
+        })
+      );
 
       // Build normalized stat maps keyed by player_id
       const skaterMap = {};
@@ -347,9 +391,7 @@ async function handleApi(request, env, pathname) {
       for (const team of teamsWithPlayers) {
         for (const p of team.players) {
           if (p.player_id in skaterMap || p.player_id in goalieMap) continue;
-          const entry = playerDataMap[p.player_id]
-            ? getPlayoffStats(playerDataMap[p.player_id], season)
-            : null;
+          const entry = playerDataMap[p.player_id] ?? null;
           if (p.position === 'G') {
             goalieMap[p.player_id] = normalizeGoalie(entry, p.player_id);
           } else {
@@ -443,8 +485,23 @@ async function handleApi(request, env, pathname) {
 
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
       const eliminatedTeams = await getEliminatedTeams(season);
-      const fetchedCount = Object.values(playerDataMap).filter(Boolean).length;
-      const withPlayoffData = Object.values(playerDataMap).filter(d => d && getPlayoffStats(d, season)).length;
+      await Promise.all(
+        standings.map((team) =>
+          db
+            .prepare(
+              `INSERT INTO team_points_snapshots (team_id, season, total_points, computed_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(team_id, season) DO UPDATE SET
+                 total_points = excluded.total_points,
+                 computed_at = CURRENT_TIMESTAMP`
+            )
+            .bind(team.id, season, team.totalPoints)
+            .run()
+        )
+      );
+
+      const fetchedCount = staleOrMissingIds.length;
+      const withPlayoffData = Object.values(playerDataMap).filter(Boolean).length;
       const result = { standings, season, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } };
       lastSuccessfulStandings = result;
       return json(result);
@@ -488,5 +545,10 @@ export default {
     }
 
     return env.ASSETS.fetch(request);
+  },
+
+  async scheduled(_event, env, _ctx) {
+    clearNhlCache();
+    await handleApi(new Request('https://cron.local/api/standings'), env, '/api/standings');
   }
 };
