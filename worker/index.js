@@ -355,6 +355,8 @@ async function handleApi(request, env, pathname) {
       )];
       const snapshotMap = await getPlayerSnapshotMap(db, season, allPlayerIds);
       const staleOrMissingIds = allPlayerIds.filter((id) => !isSnapshotFresh(snapshotMap[id]?.fetched_at));
+      let snapshotWriteErrors = 0;
+      const now = new Date().toISOString();
       const fetchedEntries = await Promise.all(
         staleOrMissingIds.map(async id => {
           try {
@@ -363,15 +365,17 @@ async function handleApi(request, env, pathname) {
             await db
               .prepare(
                 `INSERT INTO player_stats_snapshots (player_id, season, stats_json, fetched_at)
-                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                 VALUES (?, ?, ?, ?)
                  ON CONFLICT(player_id, season) DO UPDATE SET
                    stats_json = excluded.stats_json,
-                   fetched_at = CURRENT_TIMESTAMP`
+                   fetched_at = excluded.fetched_at`
               )
-              .bind(id, season, JSON.stringify(playoffStats))
+              .bind(id, season, JSON.stringify(playoffStats), now)
               .run();
             return [id, playoffStats];
-          } catch {
+          } catch (err) {
+            console.error(`[snapshot] failed to write player ${id}:`, err?.message ?? err);
+            snapshotWriteErrors++;
             return [id, null];
           }
         })
@@ -485,24 +489,29 @@ async function handleApi(request, env, pathname) {
 
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
       const eliminatedTeams = await getEliminatedTeams(season);
+      let teamSnapshotErrors = 0;
       await Promise.all(
         standings.map((team) =>
           db
             .prepare(
               `INSERT INTO team_points_snapshots (team_id, season, total_points, computed_at)
-               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               VALUES (?, ?, ?, ?)
                ON CONFLICT(team_id, season) DO UPDATE SET
                  total_points = excluded.total_points,
-                 computed_at = CURRENT_TIMESTAMP`
+                 computed_at = excluded.computed_at`
             )
-            .bind(team.id, season, team.totalPoints)
+            .bind(team.id, season, team.totalPoints, now)
             .run()
+            .catch((err) => {
+              console.error(`[snapshot] failed to write team ${team.id}:`, err?.message ?? err);
+              teamSnapshotErrors++;
+            })
         )
       );
 
       const fetchedCount = staleOrMissingIds.length;
       const withPlayoffData = Object.values(playerDataMap).filter(Boolean).length;
-      const result = { standings, season, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } };
+      const result = { standings, season, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData, snapshotWriteErrors, teamSnapshotErrors } };
       lastSuccessfulStandings = result;
       return json(result);
     } catch (e) {
