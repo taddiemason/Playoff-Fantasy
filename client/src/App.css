@@ -377,6 +377,10 @@ button { cursor: pointer; font-family: inherit; }
 
 .player-row:hover { border-color: var(--border-light); }
 
+.player-row.eliminated { opacity: 0.4; }
+.player-row.eliminated .player-name { text-decoration: line-through; color: var(--text-muted); }
+.player-row.eliminated .player-team-badge::after { content: ' OUT'; }
+
 .player-row-main {
   display: grid;
   grid-template-columns: 40px 1fr auto auto;

@@ -8,7 +8,7 @@ const POS_LABEL = { F: 'Forwards', D: 'Defensemen', G: 'Goalies' }
 const POS_ICON = { F: 'F', D: 'D', G: 'G' }
 const POS_CLASS = { F: 'forwards', D: 'defense', G: 'goalies' }
 
-function PlayerRow({ player, onRemove }) {
+function PlayerRow({ player, onRemove, eliminated }) {
   const [showBreakdown, setShowBreakdown] = useState(false)
   const [removing, setRemoving] = useState(false)
   const { stats, breakdown, points, position, position_detail } = player
@@ -23,7 +23,7 @@ function PlayerRow({ player, onRemove }) {
   const posClass = position.toLowerCase()
 
   return (
-    <div className="player-row">
+    <div className={`player-row${eliminated ? ' eliminated' : ''}`}>
       <div className="player-row-main">
         {/* Headshot */}
         {player.headshot_url
@@ -175,6 +175,7 @@ export default function TeamDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [teamData, setTeamData] = useState(null)
+  const [eliminatedTeams, setEliminatedTeams] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showAddPlayer, setShowAddPlayer] = useState(false)
@@ -193,6 +194,7 @@ export default function TeamDetail() {
       const found = standingsData.standings?.find(t => t.id === parseInt(id))
       if (found) {
         setTeamData({ team: found, poolGoalieCount: standingsData.poolGoalieCount })
+        setEliminatedTeams(standingsData.eliminatedTeams || [])
       } else {
         setError('Team not found')
       }
@@ -371,6 +373,7 @@ export default function TeamDetail() {
                 key={player.id}
                 player={player}
                 onRemove={handleRemovePlayer}
+                eliminated={eliminatedTeams.includes(player.nhl_team)}
               />
             ))
           )}
