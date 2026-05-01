@@ -85,7 +85,9 @@ export default function Home() {
     try {
       const data = await api.getStandings()
       setStandings(data)
-      setError(data.error ? `NHL API: ${data.error}` : '')
+      setError(data.stale
+        ? `Showing cached stats — live data unavailable (${data.error})`
+        : data.error ? `NHL API: ${data.error}` : '')
     } catch (err) {
       setError(err.message)
     } finally {

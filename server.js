@@ -39,6 +39,9 @@ db.exec(`
 const cache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
 
+// Last successfully computed standings — returned as stale fallback on failure
+let lastSuccessfulStandings = null;
+
 // Tracks goalies that have ever had gamesPlayed > 0. Once a goalie is confirmed
 // active they stay in the ranking pool even if a transient NHL API response
 // comes back without their playoff entry, preventing repeated rank shifts.
@@ -404,10 +407,15 @@ app.get('/api/standings', async (req, res) => {
     });
 
     standings.sort((a, b) => b.totalPoints - a.totalPoints);
-    res.json({ standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString() });
+    const result = { standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString() };
+    lastSuccessfulStandings = result;
+    res.json(result);
   } catch (e) {
     console.error('Standings error:', e);
-    // Return teams with 0 points if NHL API fails
+    if (lastSuccessfulStandings) {
+      return res.json({ ...lastSuccessfulStandings, stale: true, error: e.message });
+    }
+    // No prior successful result — return teams with 0 points
     const teams = db.prepare('SELECT * FROM teams').all();
     const standings = teams.map(t => ({
       ...t,

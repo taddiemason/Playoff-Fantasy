@@ -60,6 +60,16 @@ export const api = {
   searchPlayers: (q) => request(`/api/nhl/search?q=${encodeURIComponent(q)}`),
 
   // Standings
-  getStandings: () => request('/api/standings'),
+  getStandings: async () => {
+    try {
+      const data = await request('/api/standings')
+      if (!data.stale) localStorage.setItem('standings_cache', JSON.stringify(data))
+      return data
+    } catch (err) {
+      const cached = localStorage.getItem('standings_cache')
+      if (cached) return { ...JSON.parse(cached), stale: true, error: err.message }
+      throw err
+    }
+  },
   refreshStats: () => mutate('/api/standings/refresh', { method: 'POST' })
 };
