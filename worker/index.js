@@ -1,5 +1,6 @@
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh
+let lastSuccessfulStandings = null;
 
 // Tracks goalies that have ever had gamesPlayed > 0. Once a goalie is confirmed
 // active they stay in the ranking pool even if a transient NHL API response
@@ -424,8 +425,13 @@ async function handleApi(request, env, pathname) {
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
       const fetchedCount = Object.values(playerDataMap).filter(Boolean).length;
       const withPlayoffData = Object.values(playerDataMap).filter(d => d && getPlayoffStats(d, season)).length;
-      return json({ standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } });
+      const result = { standings, season, poolGoalieCount: n, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData } };
+      lastSuccessfulStandings = result;
+      return json(result);
     } catch (e) {
+      if (lastSuccessfulStandings) {
+        return json({ ...lastSuccessfulStandings, stale: true, error: e.message });
+      }
       const teams = await getTeams(db);
       const standings = await Promise.all(
         teams.map(async (t) => ({
