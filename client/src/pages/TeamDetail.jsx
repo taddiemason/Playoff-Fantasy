@@ -293,6 +293,12 @@ export default function TeamDetail() {
     { key: 'G', label: 'Goalies', players: goalies, max: 3 }
   ]
 
+  const eliminatedSet = new Set(
+    eliminatedTeams
+      .map(t => (t || '').toString().trim().toUpperCase())
+      .filter(Boolean)
+  )
+
   return (
     <div>
       <Link to="/" className="back-link">← Back to Standings</Link>
@@ -373,7 +379,7 @@ export default function TeamDetail() {
                 key={player.id}
                 player={player}
                 onRemove={handleRemovePlayer}
-                eliminated={eliminatedTeams.includes(player.nhl_team)}
+                eliminated={eliminatedSet.has((player.nhl_team || '').trim().toUpperCase())}
               />
             ))
           )}

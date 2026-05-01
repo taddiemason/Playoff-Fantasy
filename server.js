@@ -231,6 +231,7 @@ app.get('/api/teams/:id/players', (req, res) => {
 app.post('/api/teams/:id/players', (req, res) => {
   const { player_id, player_name, nhl_team, position, position_detail, headshot_url } = req.body;
   const team_id = parseInt(req.params.id);
+  const normalizedTeam = (nhl_team || '').trim().toUpperCase();
 
   if (!player_id || !player_name || !position) {
     return res.status(400).json({ error: 'Missing required fields' });
@@ -252,23 +253,23 @@ app.post('/api/teams/:id/players', (req, res) => {
   }
 
   if (position === 'F') {
-    const fromSameTeam = forwards.filter(p => p.nhl_team === nhl_team).length;
+    const fromSameTeam = forwards.filter(p => (p.nhl_team || '').trim().toUpperCase() === normalizedTeam).length;
     if (fromSameTeam >= 3) {
-      return res.status(400).json({ error: `Max 3 forwards from ${nhl_team} allowed` });
+      return res.status(400).json({ error: `Max 3 forwards from ${normalizedTeam} allowed` });
     }
   }
   if (position === 'D') {
-    const fromSameTeam = defensemen.filter(p => p.nhl_team === nhl_team).length;
+    const fromSameTeam = defensemen.filter(p => (p.nhl_team || '').trim().toUpperCase() === normalizedTeam).length;
     if (fromSameTeam >= 2) {
-      return res.status(400).json({ error: `Max 2 defensemen from ${nhl_team} allowed` });
+      return res.status(400).json({ error: `Max 2 defensemen from ${normalizedTeam} allowed` });
     }
   }
 
   try {
     const result = db.prepare(
       'INSERT INTO team_players (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(team_id, player_id, player_name, nhl_team || '', position, position_detail || '', headshot_url || '');
-    res.json({ id: result.lastInsertRowid, team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url });
+    ).run(team_id, player_id, player_name, normalizedTeam, position, position_detail || '', headshot_url || '');
+    res.json({ id: result.lastInsertRowid, team_id, player_id, player_name, nhl_team: normalizedTeam, position, position_detail, headshot_url });
   } catch {
     res.status(400).json({ error: 'Player is already on this team' });
   }
