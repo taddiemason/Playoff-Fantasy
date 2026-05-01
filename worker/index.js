@@ -109,7 +109,7 @@ function clearNhlCache() {
   }
 }
 
-async function getEliminatedTeams(season) {
+async function getEliminatedTeams(season, db) {
   try {
     const data = await cachedNhlFetch(`bracket-${season}`, `${NHL_BASE}/playoff-bracket/${season}`);
     const eliminated = new Set();
@@ -122,7 +122,16 @@ async function getEliminatedTeams(season) {
         else if ((bottom.wins ?? 0) >= 4) eliminated.add(top.abbrev);
       }
     }
-    return [...eliminated];
+    if (eliminated.size > 0) return [...eliminated];
+  } catch {}
+
+  // Fall back to manually set eliminated teams in DB
+  try {
+    const { results } = await db
+      .prepare('SELECT abbrev FROM eliminated_teams WHERE season = ?')
+      .bind(season)
+      .all();
+    return (results || []).map(r => r.abbrev);
   } catch {
     return [];
   }
@@ -324,6 +333,34 @@ async function handleApi(request, env, pathname) {
     return json({ success: true });
   }
 
+  if (pathname === '/api/admin/eliminated-teams' && request.method === 'GET') {
+    const season = getCurrentSeason();
+    const { results } = await db
+      .prepare('SELECT abbrev FROM eliminated_teams WHERE season = ? ORDER BY abbrev')
+      .bind(season)
+      .all();
+    return json({ season, eliminatedTeams: (results || []).map(r => r.abbrev) });
+  }
+
+  if (pathname === '/api/admin/eliminated-teams' && request.method === 'POST') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
+    const season = getCurrentSeason();
+    const body = await request.json();
+    const teams = (body.teams || []).map(t => t.toString().trim().toUpperCase()).filter(Boolean);
+
+    await db.prepare('DELETE FROM eliminated_teams WHERE season = ?').bind(season).run();
+    if (teams.length > 0) {
+      await Promise.all(
+        teams.map(abbrev =>
+          db.prepare('INSERT OR IGNORE INTO eliminated_teams (abbrev, season) VALUES (?, ?)')
+            .bind(abbrev, season)
+            .run()
+        )
+      );
+    }
+    return json({ success: true, season, eliminatedTeams: teams });
+  }
+
   if (pathname === '/api/debug/bracket' && request.method === 'GET') {
     const season = getCurrentSeason();
     try {
@@ -331,7 +368,7 @@ async function handleApi(request, env, pathname) {
         headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
       });
       const body = await res.json();
-      const eliminatedTeams = await getEliminatedTeams(season);
+      const eliminatedTeams = await getEliminatedTeams(season, db);
       return json({ status: res.status, season, eliminatedTeams, rawBracket: body });
     } catch (e) {
       return json({ error: e.message, season });
@@ -502,7 +539,7 @@ async function handleApi(request, env, pathname) {
       });
 
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
-      const eliminatedTeams = await getEliminatedTeams(season);
+      const eliminatedTeams = await getEliminatedTeams(season, db);
       let teamSnapshotErrors = 0;
       await Promise.all(
         standings.map((team) =>
