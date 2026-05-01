@@ -545,5 +545,10 @@ export default {
     }
 
     return env.ASSETS.fetch(request);
+  },
+
+  async scheduled(_event, env, _ctx) {
+    clearNhlCache();
+    await handleApi(new Request('https://cron.local/api/standings'), env, '/api/standings');
   }
 };
