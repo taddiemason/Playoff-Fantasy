@@ -254,6 +254,16 @@ button { cursor: pointer; font-family: inherit; }
 .roster-pill.d { background: rgba(139, 92, 246, 0.15); color: var(--defense); }
 .roster-pill.g { background: rgba(16, 185, 129, 0.15); color: var(--goalie); }
 
+.players-remaining {
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 5px;
+  letter-spacing: 0.02em;
+}
+.players-remaining.active-high { color: #10b981; }
+.players-remaining.active-mid  { color: #f59e0b; }
+.players-remaining.active-low  { color: #ef4444; }
+
 .team-points {
   text-align: right;
   flex-shrink: 0;

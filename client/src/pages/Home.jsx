@@ -177,11 +177,20 @@ export default function Home() {
       ) : (
         <div className="standings-grid">
           {standings?.standings?.map((team, idx) => {
+            const eliminatedSet = new Set(
+              (standings?.eliminatedTeams || []).map(t => t.trim().toUpperCase())
+            )
             const rank = idx + 1
             const rankClass = rank <= 3 ? `rank-${rank}` : ''
             const fwd = team.players.filter(p => p.position === 'F').length
             const def = team.players.filter(p => p.position === 'D').length
             const gol = team.players.filter(p => p.position === 'G').length
+            const totalPlayers = team.players.length
+            const activePlayers = team.players.filter(
+              p => !eliminatedSet.has((p.nhl_team || '').trim().toUpperCase())
+            ).length
+            const activeRatio = totalPlayers > 0 ? activePlayers / totalPlayers : 1
+            const activeClass = activeRatio > 0.66 ? 'active-high' : activeRatio > 0.33 ? 'active-mid' : 'active-low'
 
             return (
               <div
@@ -203,8 +212,13 @@ export default function Home() {
                       <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>No players added</span>
                     )}
                   </div>
+                  {totalPlayers > 0 && (
+                    <div className={`players-remaining ${activeClass}`}>
+                      {activePlayers}/{totalPlayers} active
+                    </div>
+                  )}
                   {team.tiebreaker && (
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
                       TB: {team.tiebreaker}
                     </div>
                   )}
