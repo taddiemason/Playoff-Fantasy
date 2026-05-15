@@ -442,7 +442,8 @@ app.get('/api/standings', async (req, res) => {
         }
 
         totalPoints += points;
-        return { ...p, headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`, stats, points: Math.round(points * 10) / 10, breakdown };
+        const headshot_url = p.headshot_url || playerDataMap[p.player_id]?.headshot || '';
+        return { ...p, headshot_url, stats, points: Math.round(points * 10) / 10, breakdown };
       });
 
       return { ...team, players, totalPoints: Math.round(totalPoints * 10) / 10 };
@@ -469,6 +470,27 @@ app.get('/api/standings', async (req, res) => {
     }));
     res.json({ standings, season, poolGoalieCount: 0, lastUpdated: new Date().toISOString(), error: e.message });
   }
+});
+
+app.post('/api/admin/backfill-headshots', async (req, res) => {
+  const players = db.prepare(
+    'SELECT DISTINCT player_id FROM team_players'
+  ).all();
+  let updated = 0;
+  await Promise.all(players.map(async ({ player_id }) => {
+    try {
+      const data = await fetch(`${NHL_BASE}/player/${player_id}/landing`, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0 (github.com/Zmalski/NHL-API-Reference)' }
+      });
+      if (!data.ok) return;
+      const json = await data.json();
+      if (!json.headshot) return;
+      db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+        .run(json.headshot, player_id);
+      updated++;
+    } catch {}
+  }));
+  res.json({ success: true, updated });
 });
 
 // Catch-all for React SPA in production

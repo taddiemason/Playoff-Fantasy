@@ -382,6 +382,26 @@ async function handleApi(request, env, pathname) {
     return json({ success: true, season, eliminatedTeams: teams });
   }
 
+  if (pathname === '/api/admin/backfill-headshots' && request.method === 'POST') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
+    const { results: players } = await db.prepare('SELECT DISTINCT player_id FROM team_players').all();
+    let updated = 0;
+    await Promise.all((players || []).map(async ({ player_id }) => {
+      try {
+        const res = await fetch(`${NHL_BASE}/player/${player_id}/landing`, {
+          headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.headshot) return;
+        await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+          .bind(data.headshot, player_id).run();
+        updated++;
+      } catch {}
+    }));
+    return json({ success: true, updated });
+  }
+
   if (pathname === '/api/debug/bracket' && request.method === 'GET') {
     const season = getCurrentSeason();
     try {
@@ -553,7 +573,7 @@ async function handleApi(request, env, pathname) {
           }
 
           totalPoints += points;
-          return { ...p, headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`, stats, points: Math.round(points * 10) / 10, breakdown };
+          return { ...p, stats, points: Math.round(points * 10) / 10, breakdown };
         });
 
         return { ...team, players, totalPoints: Math.round(totalPoints * 10) / 10 };
