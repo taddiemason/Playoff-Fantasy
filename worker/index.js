@@ -309,23 +309,41 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/nhl/search' && request.method === 'GET') {
-    const url = new URL(request.url);
-    const q = url.searchParams.get('q') || '';
-    if (!q.trim()) return json([]);
-    const { results } = await db
-      .prepare(
-        `SELECT DISTINCT player_id, player_name, nhl_team, position, position_detail, headshot_url
-         FROM team_players WHERE player_name LIKE ? ORDER BY player_name LIMIT 20`
-      )
-      .bind(`%${q.trim()}%`)
-      .all();
-    return json((results || []).map(p => ({
-      playerId: p.player_id,
-      name: p.player_name,
-      positionCode: p.position_detail || p.position,
-      teamAbbrev: p.nhl_team,
-      headshot: p.headshot_url || '',
-    })));
+    const searchParams = new URL(request.url).searchParams;
+    const q = searchParams.get('q') || '';
+    if (!q.trim() || q.trim().length < 2) return json([]);
+    try {
+      const searchUrl = `https://search.d3.nhle.com/api/v1/search?q=${encodeURIComponent(q.trim())}&type=player&culture=en-us&limit=20`;
+      const response = await fetch(searchUrl, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0 (github.com/Zmalski/NHL-API-Reference)' }
+      });
+      if (!response.ok) throw new Error(`NHL search ${response.status}`);
+      const data = await response.json();
+      return json((data || []).map(p => ({
+        playerId: p.playerId,
+        name: p.name,
+        positionCode: p.positionCode || '',
+        teamAbbrev: p.teamAbbrev || '',
+        sweaterNumber: p.sweaterNumber || '',
+        headshot: p.headshot || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.playerId}.png`,
+      })));
+    } catch {
+      // Fallback to DB search if NHL search API is unreachable
+      const { results } = await db
+        .prepare(
+          `SELECT DISTINCT player_id, player_name, nhl_team, position, position_detail, headshot_url
+           FROM team_players WHERE player_name LIKE ? ORDER BY player_name LIMIT 20`
+        )
+        .bind(`%${q.trim()}%`)
+        .all();
+      return json((results || []).map(p => ({
+        playerId: p.player_id,
+        name: p.player_name,
+        positionCode: p.position_detail || p.position,
+        teamAbbrev: p.nhl_team,
+        headshot: p.headshot_url || '',
+      })));
+    }
   }
 
   if (pathname === '/api/standings/refresh' && request.method === 'POST') {
