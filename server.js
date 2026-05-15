@@ -225,7 +225,11 @@ app.delete('/api/teams/:id', (req, res) => {
 // ── Players ────────────────────────────────────────────────────────────────
 
 app.get('/api/teams/:id/players', (req, res) => {
-  res.json(db.prepare('SELECT * FROM team_players WHERE team_id = ?').all(req.params.id));
+  const players = db.prepare('SELECT * FROM team_players WHERE team_id = ?').all(req.params.id);
+  res.json(players.map(p => ({
+    ...p,
+    headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`,
+  })));
 });
 
 app.post('/api/teams/:id/players', (req, res) => {

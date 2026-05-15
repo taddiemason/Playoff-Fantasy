@@ -162,7 +162,10 @@ async function getTeamPlayers(db, teamId) {
     .prepare('SELECT * FROM team_players WHERE team_id = ? ORDER BY id DESC')
     .bind(teamId)
     .all();
-  return results || [];
+  return (results || []).map(p => ({
+    ...p,
+    headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`,
+  }));
 }
 
 async function getPlayerSnapshotMap(db, season, playerIds) {
