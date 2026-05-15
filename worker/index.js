@@ -553,7 +553,7 @@ async function handleApi(request, env, pathname) {
           }
 
           totalPoints += points;
-          return { ...p, stats, points: Math.round(points * 10) / 10, breakdown };
+          return { ...p, headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`, stats, points: Math.round(points * 10) / 10, breakdown };
         });
 
         return { ...team, players, totalPoints: Math.round(totalPoints * 10) / 10 };

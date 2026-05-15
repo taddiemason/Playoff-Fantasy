@@ -442,7 +442,7 @@ app.get('/api/standings', async (req, res) => {
         }
 
         totalPoints += points;
-        return { ...p, stats, points: Math.round(points * 10) / 10, breakdown };
+        return { ...p, headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`, stats, points: Math.round(points * 10) / 10, breakdown };
       });
 
       return { ...team, players, totalPoints: Math.round(totalPoints * 10) / 10 };
@@ -463,7 +463,7 @@ app.get('/api/standings', async (req, res) => {
     const standings = teams.map(t => ({
       ...t,
       players: db.prepare('SELECT * FROM team_players WHERE team_id = ?').all(t.id).map(p => ({
-        ...p, stats: null, points: 0, breakdown: {}
+        ...p, headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`, stats: null, points: 0, breakdown: {}
       })),
       totalPoints: 0
     }));
