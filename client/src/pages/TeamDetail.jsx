@@ -12,6 +12,8 @@ function PlayerRow({ player, onRemove, eliminated }) {
   const [showBreakdown, setShowBreakdown] = useState(false)
   const [removing, setRemoving] = useState(false)
   const { stats, breakdown, points, position, position_detail } = player
+  const [headshotFailed, setHeadshotFailed] = useState(false)
+  const showHeadshot = player.headshot_url && !headshotFailed
 
   async function handleRemove() {
     if (!confirm(`Remove ${player.player_name} from this team?`)) return
@@ -26,8 +28,8 @@ function PlayerRow({ player, onRemove, eliminated }) {
     <div className={`player-row${eliminated ? ' eliminated' : ''}`}>
       <div className="player-row-main">
         {/* Headshot */}
-        {player.headshot_url
-          ? <img src={player.headshot_url} alt="" className="player-headshot" onError={e => { e.target.style.display='none' }} />
+        {showHeadshot
+          ? <img src={player.headshot_url} alt="" className="player-headshot" onError={() => setHeadshotFailed(true)} />
           : <div className="player-headshot-placeholder">{POS_ICON[position]}</div>
         }
 
