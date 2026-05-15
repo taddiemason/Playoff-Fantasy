@@ -423,7 +423,7 @@ button { cursor: pointer; font-family: inherit; }
   height: 36px;
   border-radius: 50%;
   object-fit: cover;
-  background: var(--bg-input);
+  background: transparent;
   flex-shrink: 0;
   position: relative;
   z-index: 1;
