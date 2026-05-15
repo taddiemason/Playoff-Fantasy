@@ -199,6 +199,54 @@ async function getPlayerSnapshotMap(db, season, playerIds) {
   );
 }
 
+
+async function getPlayerLandingSnapshotMap(db, playerIds) {
+  if (!playerIds.length) return {};
+  const placeholders = playerIds.map(() => '?').join(',');
+  const { results } = await db
+    .prepare(
+      `SELECT player_id, landing_json, headshot_url, fetched_at
+       FROM player_landing_snapshots
+       WHERE player_id IN (${placeholders})`
+    )
+    .bind(...playerIds)
+    .all();
+
+  return Object.fromEntries(
+    (results || []).map((row) => [row.player_id, row])
+  );
+}
+
+async function savePlayerLandingSnapshot(db, playerId, landingData, fetchedAt) {
+  const headshot = normalizeHeadshotUrl(landingData?.headshot);
+  await db
+    .prepare(
+      `INSERT INTO player_landing_snapshots (player_id, landing_json, headshot_url, fetched_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(player_id) DO UPDATE SET
+         landing_json = excluded.landing_json,
+         headshot_url = excluded.headshot_url,
+         fetched_at = excluded.fetched_at`
+    )
+    .bind(playerId, JSON.stringify(landingData), headshot, fetchedAt)
+    .run();
+  if (headshot) {
+    await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+      .bind(headshot, playerId)
+      .run();
+  }
+  return headshot;
+}
+
+function parseLandingSnapshot(snapshot) {
+  if (!snapshot?.landing_json) return null;
+  try {
+    return JSON.parse(snapshot.landing_json);
+  } catch {
+    return null;
+  }
+}
+
 function isSnapshotFresh(fetchedAt, ttlMs = STATS_SNAPSHOT_TTL_MS) {
   if (!fetchedAt) return false;
   const ts = new Date(fetchedAt).getTime();
@@ -512,6 +560,7 @@ async function handleApi(request, env, pathname) {
       const fetchedDataMap = Object.fromEntries(fetchedEntries);
       const playerDataMap = Object.fromEntries(
         allPlayerIds.map((id) => {
+          const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
           const cached = snapshotMap[id]?.stats_json ? JSON.parse(snapshotMap[id].stats_json) : null;
           const latest = Object.prototype.hasOwnProperty.call(fetchedDataMap, id) ? fetchedDataMap[id]?.stats : cached;
           return [id, latest];

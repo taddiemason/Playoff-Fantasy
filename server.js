@@ -33,6 +33,16 @@ db.exec(`
     FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
     UNIQUE(team_id, player_id)
   );
+
+  CREATE TABLE IF NOT EXISTS player_landing_snapshots (
+    player_id INTEGER PRIMARY KEY,
+    landing_json TEXT NOT NULL,
+    headshot_url TEXT DEFAULT '',
+    fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_player_landing_snapshots_fetched_at
+    ON player_landing_snapshots (fetched_at);
 `);
 
 // Simple in-memory cache (5 min TTL)
@@ -354,17 +364,29 @@ app.get('/api/standings', async (req, res) => {
     const allPlayerIds = [...new Set(
       teamsWithPlayers.flatMap(t => t.players.map(p => p.player_id))
     )];
+    const landingSnapshotMap = getPlayerLandingSnapshotMap(allPlayerIds);
     const playerEntries = await Promise.all(
       allPlayerIds.map(async id => {
         try {
           const data = await cachedFetch(`player-${id}`, `${NHL_BASE}/player/${id}/landing`);
-          return [id, data];
+          const headshot = savePlayerLandingSnapshot(id, data, new Date().toISOString());
+          return [id, { data, headshot }];
         } catch {
-          return [id, null];
+          const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
+          return [id, {
+            data: storedLanding,
+            headshot: normalizeHeadshotUrl(landingSnapshotMap[id]?.headshot_url || storedLanding?.headshot)
+          }];
         }
       })
     );
-    const playerDataMap = Object.fromEntries(playerEntries);
+    const playerApiMap = Object.fromEntries(playerEntries);
+    const playerDataMap = Object.fromEntries(
+      allPlayerIds.map(id => [id, playerApiMap[id]?.data || null])
+    );
+    const playerHeadshotMap = Object.fromEntries(
+      allPlayerIds.map(id => [id, normalizeHeadshotUrl(playerApiMap[id]?.headshot)])
+    );
 
     // Build normalized stat maps keyed by player_id
     const skaterMap = {};
