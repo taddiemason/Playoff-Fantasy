@@ -8,20 +8,9 @@ const POS_LABEL = { F: 'Forwards', D: 'Defensemen', G: 'Goalies' }
 const POS_ICON = { F: 'F', D: 'D', G: 'G' }
 const POS_CLASS = { F: 'forwards', D: 'defense', G: 'goalies' }
 
-// Abbrev → NHL numeric team ID for crest CDN URLs
-const NHL_TEAM_ID = {
-  ANA: 24, BOS: 6,  BUF: 7,  CAR: 12, CBJ: 29, CGY: 20,
-  CHI: 16, COL: 21, DAL: 25, DET: 17, EDM: 22, FLA: 13,
-  LAK: 26, MIN: 30, MTL: 8,  NJD: 1,  NSH: 18, NYI: 2,
-  NYR: 3,  OTT: 9,  PHI: 4,  PIT: 5,  SEA: 55, SJS: 28,
-  STL: 19, TBL: 14, TOR: 10, UTA: 59, VAN: 23, VGK: 54,
-  WSH: 15, WPG: 52,
-}
-
 function teamCrestUrl(abbrev) {
-  const id = NHL_TEAM_ID[abbrev?.toUpperCase()]
-  if (!id) return null
-  return `https://www-league.nhlstatic.com/images/logos/teams-current-primary-light/${id}.svg`
+  if (!abbrev) return null
+  return `https://assets.nhle.com/logos/nhl/svg/${abbrev.toUpperCase()}_light.svg`
 }
 
 function PlayerRow({ player, onRemove, eliminated }) {
