@@ -560,7 +560,6 @@ async function handleApi(request, env, pathname) {
       const fetchedDataMap = Object.fromEntries(fetchedEntries);
       const playerDataMap = Object.fromEntries(
         allPlayerIds.map((id) => {
-          const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
           const cached = snapshotMap[id]?.stats_json ? JSON.parse(snapshotMap[id].stats_json) : null;
           const latest = Object.prototype.hasOwnProperty.call(fetchedDataMap, id) ? fetchedDataMap[id]?.stats : cached;
           return [id, latest];
