@@ -27,6 +27,20 @@ function getCurrentSeason() {
 
 const NHL_BASE = 'https://api-web.nhle.com/v1';
 
+const DEFAULT_HEADSHOT_PATH_PARTS = [
+  '/mugs/nhl/00head/',
+];
+
+function isDefaultHeadshotUrl(url) {
+  if (!url) return true;
+  return DEFAULT_HEADSHOT_PATH_PARTS.some((part) => String(url).includes(part));
+}
+
+function normalizeHeadshotUrl(url) {
+  return isDefaultHeadshotUrl(url) ? '' : String(url);
+}
+
+
 function getPlayoffStats(data, season) {
   return (data.seasonTotals || []).find(
     s => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3 && String(s.season) === String(season)
@@ -164,7 +178,7 @@ async function getTeamPlayers(db, teamId) {
     .all();
   return (results || []).map(p => ({
     ...p,
-    headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`,
+    headshot_url: normalizeHeadshotUrl(p.headshot_url),
   }));
 }
 
@@ -183,6 +197,54 @@ async function getPlayerSnapshotMap(db, season, playerIds) {
   return Object.fromEntries(
     (results || []).map((row) => [row.player_id, row])
   );
+}
+
+
+async function getPlayerLandingSnapshotMap(db, playerIds) {
+  if (!playerIds.length) return {};
+  const placeholders = playerIds.map(() => '?').join(',');
+  const { results } = await db
+    .prepare(
+      `SELECT player_id, landing_json, headshot_url, fetched_at
+       FROM player_landing_snapshots
+       WHERE player_id IN (${placeholders})`
+    )
+    .bind(...playerIds)
+    .all();
+
+  return Object.fromEntries(
+    (results || []).map((row) => [row.player_id, row])
+  );
+}
+
+async function savePlayerLandingSnapshot(db, playerId, landingData, fetchedAt) {
+  const headshot = normalizeHeadshotUrl(landingData?.headshot);
+  await db
+    .prepare(
+      `INSERT INTO player_landing_snapshots (player_id, landing_json, headshot_url, fetched_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(player_id) DO UPDATE SET
+         landing_json = excluded.landing_json,
+         headshot_url = excluded.headshot_url,
+         fetched_at = excluded.fetched_at`
+    )
+    .bind(playerId, JSON.stringify(landingData), headshot, fetchedAt)
+    .run();
+  if (headshot) {
+    await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+      .bind(headshot, playerId)
+      .run();
+  }
+  return headshot;
+}
+
+function parseLandingSnapshot(snapshot) {
+  if (!snapshot?.landing_json) return null;
+  try {
+    return JSON.parse(snapshot.landing_json);
+  } catch {
+    return null;
+  }
 }
 
 function isSnapshotFresh(fetchedAt, ttlMs = STATS_SNAPSHOT_TTL_MS) {
@@ -292,7 +354,7 @@ async function handleApi(request, env, pathname) {
           (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url)
           VALUES (?, ?, ?, ?, ?, ?, ?)
           RETURNING id, team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url`)
-        .bind(teamId, player_id, player_name, nhl_team || '', position, position_detail || '', headshot_url || '')
+        .bind(teamId, player_id, player_name, nhl_team || '', position, position_detail || '', normalizeHeadshotUrl(headshot_url))
         .first();
 
       return json(result);
@@ -328,7 +390,7 @@ async function handleApi(request, env, pathname) {
         positionCode: p.positionCode || '',
         teamAbbrev: p.teamAbbrev || '',
         sweaterNumber: p.sweaterNumber || '',
-        headshot: p.headshot || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.playerId}.png`,
+        headshot: normalizeHeadshotUrl(p.headshot),
       })));
     } catch {
       // Fallback to DB search if NHL search API is unreachable
@@ -344,7 +406,7 @@ async function handleApi(request, env, pathname) {
         name: p.player_name,
         positionCode: p.position_detail || p.position,
         teamAbbrev: p.nhl_team,
-        headshot: p.headshot_url || '',
+        headshot: normalizeHeadshotUrl(p.headshot_url),
       })));
     }
   }
@@ -384,22 +446,29 @@ async function handleApi(request, env, pathname) {
 
   if (pathname === '/api/admin/backfill-headshots' && request.method === 'POST') {
     const authErr = requireAuth(request, env); if (authErr) return authErr;
-    const { results: players } = await db.prepare('SELECT DISTINCT player_id FROM team_players').all();
+    const { results: players } = await db.prepare('SELECT DISTINCT player_id, headshot_url FROM team_players').all();
     let updated = 0;
-    await Promise.all((players || []).map(async ({ player_id }) => {
+    let cleared = 0;
+    await Promise.all((players || []).map(async ({ player_id, headshot_url }) => {
       try {
         const res = await fetch(`${NHL_BASE}/player/${player_id}/landing`, {
           headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
         });
         if (!res.ok) return;
         const data = await res.json();
-        if (!data.headshot) return;
-        await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
-          .bind(data.headshot, player_id).run();
+        const headshot = await savePlayerLandingSnapshot(db, player_id, data, new Date().toISOString());
+        if (!headshot) {
+          if (headshot_url && isDefaultHeadshotUrl(headshot_url)) {
+            await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+              .bind('', player_id).run();
+            cleared++;
+          }
+          return;
+        }
         updated++;
       } catch {}
     }));
-    return json({ success: true, updated });
+    return json({ success: true, updated, cleared });
   }
 
   if (pathname === '/api/debug/bracket' && request.method === 'GET') {
@@ -446,7 +515,19 @@ async function handleApi(request, env, pathname) {
         teamsWithPlayers.flatMap(t => t.players.map(p => p.player_id))
       )];
       const snapshotMap = await getPlayerSnapshotMap(db, season, allPlayerIds);
-      const staleOrMissingIds = allPlayerIds.filter((id) => !isSnapshotFresh(snapshotMap[id]?.fetched_at));
+      const landingSnapshotMap = await getPlayerLandingSnapshotMap(db, allPlayerIds);
+      const playersMissingHeadshots = new Set(
+        teamsWithPlayers
+          .flatMap((t) => t.players)
+          .filter((p) => !normalizeHeadshotUrl(p.headshot_url))
+          .map((p) => p.player_id)
+      );
+      const staleOrMissingIds = allPlayerIds.filter(
+        (id) =>
+          !isSnapshotFresh(snapshotMap[id]?.fetched_at) ||
+          playersMissingHeadshots.has(id) ||
+          !landingSnapshotMap[id]
+      );
       let snapshotWriteErrors = 0;
       const now = new Date().toISOString();
       const fetchedEntries = await Promise.all(
@@ -454,6 +535,7 @@ async function handleApi(request, env, pathname) {
           try {
             const data = await cachedNhlFetch(`player-${id}`, `${NHL_BASE}/player/${id}/landing`);
             const playoffStats = getPlayoffStats(data, season);
+            const headshot = await savePlayerLandingSnapshot(db, id, data, now);
             await db
               .prepare(
                 `INSERT INTO player_stats_snapshots (player_id, season, stats_json, fetched_at)
@@ -464,20 +546,34 @@ async function handleApi(request, env, pathname) {
               )
               .bind(id, season, JSON.stringify(playoffStats), now)
               .run();
-            return [id, playoffStats];
+            return [id, { ok: true, stats: playoffStats, headshot }];
           } catch (err) {
             console.error(`[snapshot] failed to write player ${id}:`, err?.message ?? err);
             snapshotWriteErrors++;
-            return [id, null];
+            const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
+            return [id, {
+              ok: false,
+              stats: storedLanding ? getPlayoffStats(storedLanding, season) : null,
+              headshot: normalizeHeadshotUrl(landingSnapshotMap[id]?.headshot_url || storedLanding?.headshot)
+            }];
           }
         })
       );
-      const fetchedStatsMap = Object.fromEntries(fetchedEntries);
+      const fetchedDataMap = Object.fromEntries(fetchedEntries);
       const playerDataMap = Object.fromEntries(
         allPlayerIds.map((id) => {
+          const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
           const cached = snapshotMap[id]?.stats_json ? JSON.parse(snapshotMap[id].stats_json) : null;
-          const latest = Object.prototype.hasOwnProperty.call(fetchedStatsMap, id) ? fetchedStatsMap[id] : cached;
+          const landingStats = storedLanding ? getPlayoffStats(storedLanding, season) : null;
+          const fetchedData = fetchedDataMap[id];
+          const latest = fetchedData?.ok ? fetchedData.stats : (cached || fetchedData?.stats || landingStats);
           return [id, latest];
+        })
+      );
+      const fetchedHeadshotMap = Object.fromEntries(
+        allPlayerIds.map((id) => {
+          const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
+          return [id, normalizeHeadshotUrl(fetchedDataMap[id]?.headshot) || normalizeHeadshotUrl(landingSnapshotMap[id]?.headshot_url || storedLanding?.headshot)];
         })
       );
 
@@ -573,7 +669,13 @@ async function handleApi(request, env, pathname) {
           }
 
           totalPoints += points;
-          return { ...p, stats, points: Math.round(points * 10) / 10, breakdown };
+          return {
+            ...p,
+            headshot_url: normalizeHeadshotUrl(p.headshot_url) || fetchedHeadshotMap[p.player_id] || '',
+            stats,
+            points: Math.round(points * 10) / 10,
+            breakdown
+          };
         });
 
         return { ...team, players, totalPoints: Math.round(totalPoints * 10) / 10 };
@@ -616,6 +718,7 @@ async function handleApi(request, env, pathname) {
           ...t,
           players: (await getTeamPlayers(db, t.id)).map((p) => ({
             ...p,
+            headshot_url: normalizeHeadshotUrl(p.headshot_url),
             stats: null,
             points: 0,
             breakdown: {}

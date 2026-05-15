@@ -4,6 +4,14 @@ import { api } from '../api.js'
 const POS_MAP = { C: 'F', LW: 'F', RW: 'F', D: 'D', G: 'G' }
 const POS_LABEL = { F: 'Forward', D: 'Defenseman', G: 'Goalie' }
 
+function PlayerSearchHeadshot({ src, pos }) {
+  const [failed, setFailed] = useState(false)
+  if (!src || failed) {
+    return <div className="player-headshot-placeholder">{pos}</div>
+  }
+  return <img src={src} alt="" className="player-headshot" onError={() => setFailed(true)} />
+}
+
 function debounce(fn, ms) {
   let timer
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms) }
@@ -150,12 +158,7 @@ export default function AddPlayerModal({ teamId, existingPlayerIds, roster, onCl
               return (
                 <div key={player.playerId} className="search-result-item">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
-                    {player.headshot
-                      ? <img src={player.headshot} alt="" className="player-headshot" />
-                      : <div className="player-headshot-placeholder">
-                          {pos}
-                        </div>
-                    }
+                    <PlayerSearchHeadshot src={player.headshot} pos={pos} />
                     <div className="result-info">
                       <div className="result-name">{player.name}</div>
                       <div className="result-meta">
