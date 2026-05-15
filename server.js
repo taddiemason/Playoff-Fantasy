@@ -102,6 +102,20 @@ function getCurrentSeason() {
 
 const NHL_BASE = 'https://api-web.nhle.com/v1';
 
+const DEFAULT_HEADSHOT_PATH_PARTS = [
+  '/mugs/nhl/00head/',
+];
+
+function isDefaultHeadshotUrl(url) {
+  if (!url) return true;
+  return DEFAULT_HEADSHOT_PATH_PARTS.some((part) => String(url).includes(part));
+}
+
+function normalizeHeadshotUrl(url) {
+  return isDefaultHeadshotUrl(url) ? '' : String(url);
+}
+
+
 function getPlayoffStats(data, season) {
   return (data.seasonTotals || []).find(
     s => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3 && s.season === Number(season)
@@ -228,7 +242,7 @@ app.get('/api/teams/:id/players', (req, res) => {
   const players = db.prepare('SELECT * FROM team_players WHERE team_id = ?').all(req.params.id);
   res.json(players.map(p => ({
     ...p,
-    headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`,
+    headshot_url: normalizeHeadshotUrl(p.headshot_url),
   })));
 });
 
@@ -272,8 +286,8 @@ app.post('/api/teams/:id/players', (req, res) => {
   try {
     const result = db.prepare(
       'INSERT INTO team_players (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(team_id, player_id, player_name, normalizedTeam, position, position_detail || '', headshot_url || '');
-    res.json({ id: result.lastInsertRowid, team_id, player_id, player_name, nhl_team: normalizedTeam, position, position_detail, headshot_url });
+    ).run(team_id, player_id, player_name, normalizedTeam, position, position_detail || '', normalizeHeadshotUrl(headshot_url));
+    res.json({ id: result.lastInsertRowid, team_id, player_id, player_name, nhl_team: normalizedTeam, position, position_detail, headshot_url: normalizeHeadshotUrl(headshot_url) });
   } catch {
     res.status(400).json({ error: 'Player is already on this team' });
   }
@@ -302,7 +316,7 @@ app.get('/api/nhl/search', async (req, res) => {
       positionCode: p.positionCode || '',
       teamAbbrev: p.teamAbbrev || '',
       sweaterNumber: p.sweaterNumber || '',
-      headshot: p.headshot || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.playerId}.png`,
+      headshot: normalizeHeadshotUrl(p.headshot),
     })));
   } catch {
     // Fallback to DB search if NHL search API is unreachable
@@ -315,7 +329,7 @@ app.get('/api/nhl/search', async (req, res) => {
       name: p.player_name,
       positionCode: p.position_detail || p.position,
       teamAbbrev: p.nhl_team,
-      headshot: p.headshot_url || '',
+      headshot: normalizeHeadshotUrl(p.headshot_url),
     })));
   }
 });
@@ -442,7 +456,7 @@ app.get('/api/standings', async (req, res) => {
         }
 
         totalPoints += points;
-        const headshot_url = p.headshot_url || playerDataMap[p.player_id]?.headshot || '';
+        const headshot_url = normalizeHeadshotUrl(p.headshot_url) || normalizeHeadshotUrl(playerDataMap[p.player_id]?.headshot);
         return { ...p, headshot_url, stats, points: Math.round(points * 10) / 10, breakdown };
       });
 
@@ -464,7 +478,7 @@ app.get('/api/standings', async (req, res) => {
     const standings = teams.map(t => ({
       ...t,
       players: db.prepare('SELECT * FROM team_players WHERE team_id = ?').all(t.id).map(p => ({
-        ...p, headshot_url: p.headshot_url || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.player_id}.png`, stats: null, points: 0, breakdown: {}
+        ...p, headshot_url: normalizeHeadshotUrl(p.headshot_url), stats: null, points: 0, breakdown: {}
       })),
       totalPoints: 0
     }));
@@ -474,23 +488,32 @@ app.get('/api/standings', async (req, res) => {
 
 app.post('/api/admin/backfill-headshots', async (req, res) => {
   const players = db.prepare(
-    'SELECT DISTINCT player_id FROM team_players'
+    'SELECT DISTINCT player_id, headshot_url FROM team_players'
   ).all();
   let updated = 0;
-  await Promise.all(players.map(async ({ player_id }) => {
+  let cleared = 0;
+  await Promise.all(players.map(async ({ player_id, headshot_url }) => {
     try {
       const data = await fetch(`${NHL_BASE}/player/${player_id}/landing`, {
         headers: { 'User-Agent': 'PlayoffFantasy/1.0 (github.com/Zmalski/NHL-API-Reference)' }
       });
       if (!data.ok) return;
       const json = await data.json();
-      if (!json.headshot) return;
+      const headshot = normalizeHeadshotUrl(json.headshot);
+      if (!headshot) {
+        if (headshot_url && isDefaultHeadshotUrl(headshot_url)) {
+          db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+            .run('', player_id);
+          cleared++;
+        }
+        return;
+      }
       db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
-        .run(json.headshot, player_id);
+        .run(headshot, player_id);
       updated++;
     } catch {}
   }));
-  res.json({ success: true, updated });
+  res.json({ success: true, updated, cleared });
 });
 
 // Catch-all for React SPA in production
