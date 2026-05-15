@@ -461,36 +461,78 @@ button { cursor: pointer; font-family: inherit; }
 
 .player-stats-mini {
   display: flex;
-  gap: 10px;
+  gap: 6px;
   align-items: center;
 }
 
-.stat-mini {
-  text-align: center;
-  min-width: 32px;
+/* Separated stat chip */
+.stat-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  min-width: 36px;
 }
 
-.stat-mini-value {
-  font-size: 14px;
+.stat-chip-value {
+  font-size: 13px;
   font-weight: 700;
   color: var(--text);
   line-height: 1;
 }
 
-.stat-mini-label {
+.stat-chip-value.pm-positive { color: var(--green); }
+.stat-chip-value.pm-negative { color: var(--red); }
+
+.stat-chip-label {
   font-size: 9px;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.3px;
-  margin-top: 2px;
+  letter-spacing: 0.4px;
 }
 
-.player-points-badge {
+/* Points chip — ice blue on dark blue */
+.player-points-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #0d2244;
+  border: 1px solid #1e4080;
+  border-radius: 20px;
+  padding: 3px 10px 3px 8px;
+  white-space: nowrap;
+}
+
+.player-points-chip.eliminated {
+  background: var(--bg-input);
+  border-color: var(--border);
+}
+
+.player-points-chip-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #6ba3e8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.player-points-chip.eliminated .player-points-chip-label {
+  color: var(--text-muted);
+}
+
+.player-points-chip-value {
   font-size: 16px;
   font-weight: 800;
-  color: var(--primary);
-  min-width: 50px;
-  text-align: right;
+  color: #93c5fd;
+  line-height: 1;
+}
+
+.player-points-chip.eliminated .player-points-chip-value {
+  color: var(--text-muted);
 }
 
 .player-actions {

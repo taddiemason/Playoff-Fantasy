@@ -47,56 +47,59 @@ function PlayerRow({ player, onRemove, eliminated }) {
         {/* Stats mini (skaters only) */}
         {position !== 'G' && stats && (
           <div className="player-stats-mini">
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.goals ?? 0}</div>
-              <div className="stat-mini-label">G</div>
+            <div className="stat-chip">
+              <div className="stat-chip-value">{stats.goals ?? 0}</div>
+              <div className="stat-chip-label">G</div>
             </div>
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.assists ?? 0}</div>
-              <div className="stat-mini-label">A</div>
+            <div className="stat-chip">
+              <div className="stat-chip-value">{stats.assists ?? 0}</div>
+              <div className="stat-chip-label">A</div>
             </div>
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.plusMinus ?? 0}</div>
-              <div className="stat-mini-label">+/-</div>
+            <div className="stat-chip">
+              <div className={`stat-chip-value ${(stats.plusMinus ?? 0) > 0 ? 'pm-positive' : (stats.plusMinus ?? 0) < 0 ? 'pm-negative' : ''}`}>
+                {(stats.plusMinus ?? 0) > 0 ? '+' : ''}{stats.plusMinus ?? 0}
+              </div>
+              <div className="stat-chip-label">+/-</div>
             </div>
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.penaltyMinutes ?? 0}</div>
-              <div className="stat-mini-label">PIM</div>
+            <div className="stat-chip">
+              <div className="stat-chip-value">{stats.penaltyMinutes ?? 0}</div>
+              <div className="stat-chip-label">PIM</div>
             </div>
           </div>
         )}
         {position === 'G' && stats && (
           <div className="player-stats-mini">
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.wins ?? 0}</div>
-              <div className="stat-mini-label">W</div>
+            <div className="stat-chip">
+              <div className="stat-chip-value">{stats.wins ?? 0}</div>
+              <div className="stat-chip-label">W</div>
             </div>
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.shutouts ?? 0}</div>
-              <div className="stat-mini-label">SO</div>
+            <div className="stat-chip">
+              <div className="stat-chip-value">{stats.shutouts ?? 0}</div>
+              <div className="stat-chip-label">SO</div>
             </div>
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.goalsAgainstAverage?.toFixed(2) ?? '–'}</div>
-              <div className="stat-mini-label">GAA</div>
+            <div className="stat-chip">
+              <div className="stat-chip-value">{stats.goalsAgainstAverage?.toFixed(2) ?? '–'}</div>
+              <div className="stat-chip-label">GAA</div>
             </div>
-            <div className="stat-mini">
-              <div className="stat-mini-value">{stats.savePct ? (stats.savePct * 1).toFixed(3) : '–'}</div>
-              <div className="stat-mini-label">SV%</div>
+            <div className="stat-chip">
+              <div className="stat-chip-value">{stats.savePct ? (stats.savePct * 1).toFixed(3) : '–'}</div>
+              <div className="stat-chip-label">SV%</div>
             </div>
           </div>
         )}
 
         {/* Points + actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
             {stats ? (
               <>
-                <div className="player-points-badge">{points}</div>
-                {stats && (
-                  <button className="breakdown-toggle" onClick={() => setShowBreakdown(s => !s)}>
-                    {showBreakdown ? '▲' : '▼'} pts
-                  </button>
-                )}
+                <div className={`player-points-chip${eliminated ? ' eliminated' : ''}`}>
+                  <span className="player-points-chip-label">pts</span>
+                  <span className="player-points-chip-value">{points}</span>
+                </div>
+                <button className="breakdown-toggle" onClick={() => setShowBreakdown(s => !s)}>
+                  {showBreakdown ? '▲' : '▼'} breakdown
+                </button>
               </>
             ) : (
               <span className="no-stats-msg">No data</span>
