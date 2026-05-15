@@ -415,6 +415,7 @@ button { cursor: pointer; font-family: inherit; }
   filter: grayscale(1);
   pointer-events: none;
   user-select: none;
+  z-index: 0;
 }
 
 .player-headshot {
@@ -424,6 +425,8 @@ button { cursor: pointer; font-family: inherit; }
   object-fit: cover;
   background: var(--bg-input);
   flex-shrink: 0;
+  position: relative;
+  z-index: 1;
 }
 
 .player-headshot-placeholder {
@@ -437,6 +440,8 @@ button { cursor: pointer; font-family: inherit; }
   justify-content: center;
   font-size: 16px;
   flex-shrink: 0;
+  position: relative;
+  z-index: 1;
 }
 
 .player-info { min-width: 0; }
