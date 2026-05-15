@@ -161,6 +161,11 @@ function requireAuth(request, env) {
 }
 
 
+function teamCrestUrl(abbrev) {
+  if (!abbrev) return '';
+  return `https://assets.nhle.com/logos/nhl/svg/${abbrev.toUpperCase()}_light.svg`;
+}
+
 function parseId(value) {
   const id = Number.parseInt(value, 10);
   return Number.isFinite(id) ? id : null;
@@ -351,10 +356,10 @@ async function handleApi(request, env, pathname) {
     try {
       const result = await db
         .prepare(`INSERT INTO team_players
-          (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-          RETURNING id, team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url`)
-        .bind(teamId, player_id, player_name, nhl_team || '', position, position_detail || '', normalizeHeadshotUrl(headshot_url))
+          (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          RETURNING id, team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url`)
+        .bind(teamId, player_id, player_name, nhl_team || '', position, position_detail || '', normalizeHeadshotUrl(headshot_url), teamCrestUrl(nhl_team))
         .first();
 
       return json(result);
