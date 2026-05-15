@@ -8,10 +8,6 @@ const POS_LABEL = { F: 'Forwards', D: 'Defensemen', G: 'Goalies' }
 const POS_ICON = { F: 'F', D: 'D', G: 'G' }
 const POS_CLASS = { F: 'forwards', D: 'defense', G: 'goalies' }
 
-function teamCrestUrl(abbrev) {
-  if (!abbrev) return null
-  return `https://assets.nhle.com/logos/nhl/svg/${abbrev.toUpperCase()}_light.svg`
-}
 
 function PlayerRow({ player, onRemove, eliminated }) {
   const [showBreakdown, setShowBreakdown] = useState(false)
@@ -29,7 +25,7 @@ function PlayerRow({ player, onRemove, eliminated }) {
 
   const posClass = position.toLowerCase()
 
-  const crestUrl = teamCrestUrl(player.nhl_team)
+  const crestUrl = player.crest_url || null
 
   return (
     <div className={`player-row${eliminated ? ' eliminated' : ''}`}>

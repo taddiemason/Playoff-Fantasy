@@ -125,6 +125,11 @@ function normalizeHeadshotUrl(url) {
   return isDefaultHeadshotUrl(url) ? '' : String(url);
 }
 
+function teamCrestUrl(abbrev) {
+  if (!abbrev) return '';
+  return `https://assets.nhle.com/logos/nhl/svg/${abbrev.toUpperCase()}_light.svg`;
+}
+
 
 function getPlayoffStats(data, season) {
   return (data.seasonTotals || []).find(
@@ -295,9 +300,9 @@ app.post('/api/teams/:id/players', (req, res) => {
 
   try {
     const result = db.prepare(
-      'INSERT INTO team_players (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(team_id, player_id, player_name, normalizedTeam, position, position_detail || '', normalizeHeadshotUrl(headshot_url));
-    res.json({ id: result.lastInsertRowid, team_id, player_id, player_name, nhl_team: normalizedTeam, position, position_detail, headshot_url: normalizeHeadshotUrl(headshot_url) });
+      'INSERT INTO team_players (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(team_id, player_id, player_name, normalizedTeam, position, position_detail || '', normalizeHeadshotUrl(headshot_url), teamCrestUrl(normalizedTeam));
+    res.json({ id: result.lastInsertRowid, team_id, player_id, player_name, nhl_team: normalizedTeam, position, position_detail, headshot_url: normalizeHeadshotUrl(headshot_url), crest_url: teamCrestUrl(normalizedTeam) });
   } catch {
     res.status(400).json({ error: 'Player is already on this team' });
   }
