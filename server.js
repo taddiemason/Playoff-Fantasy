@@ -282,20 +282,38 @@ app.delete('/api/teams/:teamId/players/:id', (req, res) => {
 
 // ── NHL API Proxy ──────────────────────────────────────────────────────────
 
-app.get('/api/nhl/search', (req, res) => {
+app.get('/api/nhl/search', async (req, res) => {
   const { q } = req.query;
-  if (!q?.trim()) return res.json([]);
-  const players = db.prepare(
-    `SELECT DISTINCT player_id, player_name, nhl_team, position, position_detail, headshot_url
-     FROM team_players WHERE player_name LIKE ? ORDER BY player_name LIMIT 20`
-  ).all(`%${q.trim()}%`);
-  res.json(players.map(p => ({
-    playerId: p.player_id,
-    name: p.player_name,
-    positionCode: p.position_detail || p.position,
-    teamAbbrev: p.nhl_team,
-    headshot: p.headshot_url || '',
-  })));
+  if (!q?.trim() || q.trim().length < 2) return res.json([]);
+  try {
+    const searchUrl = `https://search.d3.nhle.com/api/v1/search?q=${encodeURIComponent(q.trim())}&type=player&culture=en-us&limit=20`;
+    const response = await fetch(searchUrl, {
+      headers: { 'User-Agent': 'PlayoffFantasy/1.0 (github.com/Zmalski/NHL-API-Reference)' }
+    });
+    if (!response.ok) throw new Error(`NHL search ${response.status}`);
+    const data = await response.json();
+    return res.json((data || []).map(p => ({
+      playerId: p.playerId,
+      name: p.name,
+      positionCode: p.positionCode || '',
+      teamAbbrev: p.teamAbbrev || '',
+      sweaterNumber: p.sweaterNumber || '',
+      headshot: p.headshot || `https://assets.nhle.com/mugs/nhl/00head/168x168/${p.playerId}.png`,
+    })));
+  } catch {
+    // Fallback to DB search if NHL search API is unreachable
+    const players = db.prepare(
+      `SELECT DISTINCT player_id, player_name, nhl_team, position, position_detail, headshot_url
+       FROM team_players WHERE player_name LIKE ? ORDER BY player_name LIMIT 20`
+    ).all(`%${q.trim()}%`);
+    return res.json(players.map(p => ({
+      playerId: p.player_id,
+      name: p.player_name,
+      positionCode: p.position_detail || p.position,
+      teamAbbrev: p.nhl_team,
+      headshot: p.headshot_url || '',
+    })));
+  }
 });
 
 // ── Standings (calculates all fantasy points) ──────────────────────────────
