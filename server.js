@@ -126,44 +126,6 @@ function normalizeHeadshotUrl(url) {
 }
 
 
-
-function getPlayerLandingSnapshotMap(playerIds) {
-  if (!playerIds.length) return {};
-  const placeholders = playerIds.map(() => '?').join(',');
-  const rows = db.prepare(
-    `SELECT player_id, landing_json, headshot_url, fetched_at
-     FROM player_landing_snapshots
-     WHERE player_id IN (${placeholders})`
-  ).all(...playerIds);
-  return Object.fromEntries(rows.map((row) => [row.player_id, row]));
-}
-
-function savePlayerLandingSnapshot(playerId, landingData, fetchedAt) {
-  const headshot = normalizeHeadshotUrl(landingData?.headshot);
-  db.prepare(
-    `INSERT INTO player_landing_snapshots (player_id, landing_json, headshot_url, fetched_at)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(player_id) DO UPDATE SET
-       landing_json = excluded.landing_json,
-       headshot_url = excluded.headshot_url,
-       fetched_at = excluded.fetched_at`
-  ).run(playerId, JSON.stringify(landingData), headshot, fetchedAt);
-  if (headshot) {
-    db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
-      .run(headshot, playerId);
-  }
-  return headshot;
-}
-
-function parseLandingSnapshot(snapshot) {
-  if (!snapshot?.landing_json) return null;
-  try {
-    return JSON.parse(snapshot.landing_json);
-  } catch {
-    return null;
-  }
-}
-
 function getPlayoffStats(data, season) {
   return (data.seasonTotals || []).find(
     s => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3 && s.season === Number(season)
@@ -516,7 +478,7 @@ app.get('/api/standings', async (req, res) => {
         }
 
         totalPoints += points;
-        const headshot_url = normalizeHeadshotUrl(p.headshot_url) || playerHeadshotMap[p.player_id] || normalizeHeadshotUrl(playerDataMap[p.player_id]?.headshot);
+        const headshot_url = normalizeHeadshotUrl(p.headshot_url) || normalizeHeadshotUrl(playerDataMap[p.player_id]?.headshot);
         return { ...p, headshot_url, stats, points: Math.round(points * 10) / 10, breakdown };
       });
 
@@ -559,7 +521,7 @@ app.post('/api/admin/backfill-headshots', async (req, res) => {
       });
       if (!data.ok) return;
       const json = await data.json();
-      const headshot = savePlayerLandingSnapshot(player_id, json, new Date().toISOString());
+      const headshot = normalizeHeadshotUrl(json.headshot);
       if (!headshot) {
         if (headshot_url && isDefaultHeadshotUrl(headshot_url)) {
           db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
@@ -568,6 +530,8 @@ app.post('/api/admin/backfill-headshots', async (req, res) => {
         }
         return;
       }
+      db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+        .run(headshot, player_id);
       updated++;
     } catch {}
   }));

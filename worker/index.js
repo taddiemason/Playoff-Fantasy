@@ -456,7 +456,7 @@ async function handleApi(request, env, pathname) {
         });
         if (!res.ok) return;
         const data = await res.json();
-        const headshot = await savePlayerLandingSnapshot(db, player_id, data, new Date().toISOString());
+        const headshot = normalizeHeadshotUrl(data.headshot);
         if (!headshot) {
           if (headshot_url && isDefaultHeadshotUrl(headshot_url)) {
             await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
@@ -465,6 +465,8 @@ async function handleApi(request, env, pathname) {
           }
           return;
         }
+        await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+          .bind(headshot, player_id).run();
         updated++;
       } catch {}
     }));
@@ -515,7 +517,6 @@ async function handleApi(request, env, pathname) {
         teamsWithPlayers.flatMap(t => t.players.map(p => p.player_id))
       )];
       const snapshotMap = await getPlayerSnapshotMap(db, season, allPlayerIds);
-      const landingSnapshotMap = await getPlayerLandingSnapshotMap(db, allPlayerIds);
       const playersMissingHeadshots = new Set(
         teamsWithPlayers
           .flatMap((t) => t.players)
@@ -523,10 +524,7 @@ async function handleApi(request, env, pathname) {
           .map((p) => p.player_id)
       );
       const staleOrMissingIds = allPlayerIds.filter(
-        (id) =>
-          !isSnapshotFresh(snapshotMap[id]?.fetched_at) ||
-          playersMissingHeadshots.has(id) ||
-          !landingSnapshotMap[id]
+        (id) => !isSnapshotFresh(snapshotMap[id]?.fetched_at) || playersMissingHeadshots.has(id)
       );
       let snapshotWriteErrors = 0;
       const now = new Date().toISOString();
@@ -535,7 +533,12 @@ async function handleApi(request, env, pathname) {
           try {
             const data = await cachedNhlFetch(`player-${id}`, `${NHL_BASE}/player/${id}/landing`);
             const playoffStats = getPlayoffStats(data, season);
-            const headshot = await savePlayerLandingSnapshot(db, id, data, now);
+            const headshot = normalizeHeadshotUrl(data?.headshot);
+            if (headshot) {
+              await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
+                .bind(headshot, id)
+                .run();
+            }
             await db
               .prepare(
                 `INSERT INTO player_stats_snapshots (player_id, season, stats_json, fetched_at)
@@ -546,16 +549,11 @@ async function handleApi(request, env, pathname) {
               )
               .bind(id, season, JSON.stringify(playoffStats), now)
               .run();
-            return [id, { ok: true, stats: playoffStats, headshot }];
+            return [id, { stats: playoffStats, headshot }];
           } catch (err) {
             console.error(`[snapshot] failed to write player ${id}:`, err?.message ?? err);
             snapshotWriteErrors++;
-            const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
-            return [id, {
-              ok: false,
-              stats: storedLanding ? getPlayoffStats(storedLanding, season) : null,
-              headshot: normalizeHeadshotUrl(landingSnapshotMap[id]?.headshot_url || storedLanding?.headshot)
-            }];
+            return [id, { stats: null, headshot: '' }];
           }
         })
       );
@@ -564,17 +562,12 @@ async function handleApi(request, env, pathname) {
         allPlayerIds.map((id) => {
           const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
           const cached = snapshotMap[id]?.stats_json ? JSON.parse(snapshotMap[id].stats_json) : null;
-          const landingStats = storedLanding ? getPlayoffStats(storedLanding, season) : null;
-          const fetchedData = fetchedDataMap[id];
-          const latest = fetchedData?.ok ? fetchedData.stats : (cached || fetchedData?.stats || landingStats);
+          const latest = Object.prototype.hasOwnProperty.call(fetchedDataMap, id) ? fetchedDataMap[id]?.stats : cached;
           return [id, latest];
         })
       );
       const fetchedHeadshotMap = Object.fromEntries(
-        allPlayerIds.map((id) => {
-          const storedLanding = parseLandingSnapshot(landingSnapshotMap[id]);
-          return [id, normalizeHeadshotUrl(fetchedDataMap[id]?.headshot) || normalizeHeadshotUrl(landingSnapshotMap[id]?.headshot_url || storedLanding?.headshot)];
-        })
+        Object.entries(fetchedDataMap).map(([id, data]) => [id, normalizeHeadshotUrl(data?.headshot)])
       );
 
       // Build normalized stat maps keyed by player_id
