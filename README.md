@@ -1,4 +1,4 @@
-# Playoff Fantasy 
+# Playoff Fantasy    
 
 ## Deploying to Cloudflare (Workers + D1)
 
