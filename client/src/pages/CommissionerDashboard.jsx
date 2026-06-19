@@ -31,6 +31,12 @@ export default function CommissionerDashboard() {
   const [inviteDays, setInviteDays] = useState('')
   const [creatingInvite, setCreatingInvite] = useState(false)
 
+  // Schedule generation form
+  const [schedStartDate, setSchedStartDate] = useState('')
+  const [schedWeeks, setSchedWeeks] = useState(10)
+  const [schedMsg, setSchedMsg] = useState(null)
+  const [scheduling, setScheduling] = useState(false)
+
   const loadMembers = useCallback(() => {
     api.leagues.getMembers(leagueId).then(setMembers).catch((e) => setError(e.message))
   }, [leagueId])
@@ -87,6 +93,21 @@ export default function CommissionerDashboard() {
       setSettingsMsg({ type: 'error', text: err.message })
     } finally {
       setSavingSettings(false)
+    }
+  }
+
+  async function generateSchedule(e) {
+    e.preventDefault()
+    if (!schedStartDate || !schedWeeks) return
+    setScheduling(true)
+    setSchedMsg(null)
+    try {
+      const result = await api.leagues.schedule.generate(leagueId, schedStartDate, Number(schedWeeks))
+      setSchedMsg({ type: 'success', text: `Schedule created: ${result.periods.length} weeks` })
+    } catch (err) {
+      setSchedMsg({ type: 'error', text: err.message })
+    } finally {
+      setScheduling(false)
     }
   }
 
@@ -238,6 +259,44 @@ export default function CommissionerDashboard() {
           ))
         )}
       </div>
+
+      {/* ── Schedule Generation ── */}
+      <section className="card" style={{ marginTop: '2rem' }}>
+        <h2 className="section-title">Season Schedule</h2>
+        <form onSubmit={generateSchedule} className="form-stack">
+          <div className="form-row">
+            <label className="form-label">Start Date</label>
+            <input
+              type="date"
+              className="input"
+              value={schedStartDate}
+              onChange={e => setSchedStartDate(e.target.value)}
+              required
+            />
+          </div>
+          <div className="form-row">
+            <label className="form-label">Number of Weeks</label>
+            <input
+              type="number"
+              className="input"
+              min={1}
+              max={52}
+              value={schedWeeks}
+              onChange={e => setSchedWeeks(e.target.value)}
+              required
+            />
+          </div>
+          {schedMsg && (
+            <div className={`alert alert-${schedMsg.type === 'success' ? 'success' : 'error'}`}>
+              {schedMsg.text}
+            </div>
+          )}
+          <button type="submit" className="btn btn-primary" disabled={scheduling}>
+            {scheduling ? 'Generating…' : 'Generate Schedule'}
+          </button>
+          <p className="hint">Regenerating overwrites the existing schedule.</p>
+        </form>
+      </section>
 
       {/* ── Members ── */}
       <div className="card settings-card">
