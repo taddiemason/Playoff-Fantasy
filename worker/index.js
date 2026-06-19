@@ -230,6 +230,7 @@ const DEFAULT_LEAGUE_CONFIG = {
   roster: { maxF: 10, maxD: 5, maxG: 3, maxSameTeamF: 3, maxSameTeamD: 2 },
   active_slots: { F: 6, D: 3, G: 2 },
   lineup_lock_hour_utc: 23,
+  trade_veto_hours: 24,
   lock: { lockedAt: null, rule: 'Before puck drop of Game 1' },
   payout: [
     { minEntries: 0, split: 'Winner takes all' },
@@ -257,6 +258,7 @@ function mergeConfig(stored) {
     roster: { ...d.roster, ...(parsed.roster) },
     active_slots: { ...d.active_slots, ...(parsed.active_slots) },
     lineup_lock_hour_utc: parsed.lineup_lock_hour_utc ?? d.lineup_lock_hour_utc,
+    trade_veto_hours: parsed.trade_veto_hours ?? d.trade_veto_hours,
     lock: { ...d.lock, ...(parsed.lock) },
     payout: Array.isArray(parsed.payout) ? parsed.payout : d.payout,
     tiebreaker: { ...d.tiebreaker, ...(parsed.tiebreaker) },
