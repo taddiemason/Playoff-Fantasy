@@ -976,6 +976,10 @@ async function handleApi(request, env, pathname) {
       .bind(periodId, leagueId).first();
     if (!period) return json({ error: 'Period not found' }, { status: 404 });
 
+    const lineupTeam = await db.prepare('SELECT id FROM teams WHERE id = ? AND league_id = ?')
+      .bind(teamId, leagueId).first();
+    if (!lineupTeam) return json({ error: 'Team not found in this league' }, { status: 404 });
+
     const cfg = mergeConfig(ctx.league.config_json);
     const slots = getActiveSlots(cfg);
     const locked = period.lock_time ? new Date(period.lock_time).getTime() <= Date.now() : false;
