@@ -228,6 +228,8 @@ const DEFAULT_LEAGUE_CONFIG = {
     goalie: { win: 2, shutout: 3, gaaRank: true, svpRank: true },
   },
   roster: { maxF: 10, maxD: 5, maxG: 3, maxSameTeamF: 3, maxSameTeamD: 2 },
+  active_slots: { F: 6, D: 3, G: 2 },
+  lineup_lock_hour_utc: 23,
   lock: { lockedAt: null, rule: 'Before puck drop of Game 1' },
   payout: [
     { minEntries: 0, split: 'Winner takes all' },
@@ -253,6 +255,8 @@ function mergeConfig(stored) {
       goalie: { ...d.scoring.goalie, ...(parsed.scoring?.goalie) },
     },
     roster: { ...d.roster, ...(parsed.roster) },
+    active_slots: { ...d.active_slots, ...(parsed.active_slots) },
+    lineup_lock_hour_utc: parsed.lineup_lock_hour_utc ?? d.lineup_lock_hour_utc,
     lock: { ...d.lock, ...(parsed.lock) },
     payout: Array.isArray(parsed.payout) ? parsed.payout : d.payout,
     tiebreaker: { ...d.tiebreaker, ...(parsed.tiebreaker) },
@@ -459,6 +463,94 @@ function isSnapshotFresh(fetchedAt, ttlMs = STATS_SNAPSHOT_TTL_MS) {
   if (!fetchedAt) return false;
   const ts = new Date(fetchedAt).getTime();
   return Number.isFinite(ts) && (Date.now() - ts) < ttlMs;
+}
+
+// ── Schedule & matchup helpers ──────────────────────────────────────────────
+
+function getActiveSlots(config) {
+  return { F: config.active_slots?.F ?? 6, D: config.active_slots?.D ?? 3, G: config.active_slots?.G ?? 2 };
+}
+
+function generateRoundRobin(teams, startDate, numWeeks, lockHourUtc = 23) {
+  const slots = [...teams];
+  if (slots.length % 2 !== 0) slots.push(null); // null = bye
+  const n = slots.length;
+  const periods = [];
+  const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+  const base = new Date(startDate + 'T00:00:00Z');
+
+  for (let week = 0; week < numWeeks; week++) {
+    const periodStart = new Date(base.getTime() + week * msPerWeek);
+    const periodEnd = new Date(base.getTime() + (week + 1) * msPerWeek - 1);
+    const lockDate = new Date(periodStart);
+    lockDate.setUTCHours(lockHourUtc, 0, 0, 0);
+
+    const pairings = [];
+    for (let i = 0; i < n / 2; i++) {
+      const home = slots[i];
+      const away = slots[n - 1 - i];
+      if (home !== null && away !== null) {
+        pairings.push({ home_team_id: home.id, away_team_id: away.id });
+      }
+    }
+
+    periods.push({
+      period_num: week + 1,
+      start_date: periodStart.toISOString().slice(0, 10),
+      end_date: periodEnd.toISOString().slice(0, 10),
+      lock_time: lockDate.toISOString(),
+      matchups: pairings,
+    });
+
+    // Rotate: keep slots[0] fixed, rotate slots[1..]
+    const last = slots[n - 1];
+    for (let i = n - 1; i > 1; i--) slots[i] = slots[i - 1];
+    slots[1] = last;
+  }
+
+  return periods;
+}
+
+async function getTeamRecords(db, leagueId) {
+  const { results } = await db.prepare(`
+    SELECT team_id,
+      SUM(CASE WHEN result = 'W' THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN result = 'L' THEN 1 ELSE 0 END) AS losses,
+      SUM(CASE WHEN result = 'T' THEN 1 ELSE 0 END) AS ties
+    FROM (
+      SELECT home_team_id AS team_id,
+        CASE
+          WHEN home_score > away_score THEN 'W'
+          WHEN home_score < away_score THEN 'L'
+          ELSE 'T'
+        END AS result
+      FROM matchups
+      WHERE league_id = ? AND (winner_team_id IS NOT NULL OR home_score > 0 OR away_score > 0)
+      UNION ALL
+      SELECT away_team_id,
+        CASE
+          WHEN away_score > home_score THEN 'W'
+          WHEN away_score < home_score THEN 'L'
+          ELSE 'T'
+        END AS result
+      FROM matchups
+      WHERE league_id = ? AND (winner_team_id IS NOT NULL OR home_score > 0 OR away_score > 0)
+    ) sub
+    GROUP BY team_id
+  `).bind(leagueId, leagueId).all();
+
+  const map = new Map();
+  for (const row of (results || [])) {
+    map.set(row.team_id, { wins: row.wins ?? 0, losses: row.losses ?? 0, ties: row.ties ?? 0 });
+  }
+  return map;
+}
+
+async function getCurrentPeriod(db, leagueId) {
+  const today = new Date().toISOString().slice(0, 10);
+  return db.prepare(
+    `SELECT * FROM matchup_periods WHERE league_id = ? AND start_date <= ? AND end_date >= ? LIMIT 1`
+  ).bind(leagueId, today, today).first();
 }
 
 async function handleApi(request, env, pathname) {
