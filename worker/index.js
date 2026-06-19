@@ -892,6 +892,107 @@ async function handleApi(request, env, pathname) {
     return json({ periods: allPeriods || [] });
   }
 
+  // ── Lineup ────────────────────────────────────────────────────────────────
+  const lineupMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams\/(\d+)\/lineup\/(\d+)$/);
+  if (lineupMatch && request.method === 'GET') {
+    const leagueId = parseId(lineupMatch[1]);
+    const teamId   = parseId(lineupMatch[2]);
+    const periodId = parseId(lineupMatch[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const period = await db.prepare('SELECT * FROM matchup_periods WHERE id = ? AND league_id = ?')
+      .bind(periodId, leagueId).first();
+    if (!period) return json({ error: 'Period not found' }, { status: 404 });
+
+    const cfg = mergeConfig(ctx.league.config_json);
+    const slots = getActiveSlots(cfg);
+    const locked = period.lock_time ? new Date(period.lock_time).getTime() <= Date.now() : false;
+
+    const players = await getTeamPlayers(db, teamId);
+    const { results: arRows } = await db
+      .prepare('SELECT player_id, is_active FROM active_roster WHERE team_id = ? AND period_id = ?')
+      .bind(teamId, periodId).all();
+
+    let activeMap;
+    if (arRows && arRows.length > 0) {
+      activeMap = new Map(arRows.map(r => [r.player_id, !!r.is_active]));
+    } else {
+      // Auto-seed: first N players per position are active
+      const countByPos = { F: 0, D: 0, G: 0 };
+      activeMap = new Map(players.map(p => {
+        const pos = mapPosition(p.position);
+        const limit = slots[pos] ?? 0;
+        const active = countByPos[pos] < limit;
+        countByPos[pos]++;
+        return [p.player_id, active];
+      }));
+    }
+
+    const active = players.filter(p => activeMap.get(p.player_id));
+    const bench  = players.filter(p => !activeMap.get(p.player_id));
+    return json({ active, bench, slots, locked });
+  }
+
+  if (lineupMatch && request.method === 'PUT') {
+    const leagueId = parseId(lineupMatch[1]);
+    const teamId   = parseId(lineupMatch[2]);
+    const periodId = parseId(lineupMatch[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT * FROM teams WHERE id = ? AND league_id = ?')
+      .bind(teamId, leagueId).first();
+    if (!team) return json({ error: 'Team not found' }, { status: 404 });
+    if (team.user_id !== ctx.user.id && !isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+      return json({ error: 'You can only set your own lineup' }, { status: 403 });
+    }
+
+    const period = await db.prepare('SELECT * FROM matchup_periods WHERE id = ? AND league_id = ?')
+      .bind(periodId, leagueId).first();
+    if (!period) return json({ error: 'Period not found' }, { status: 404 });
+    if (period.lock_time && new Date(period.lock_time).getTime() <= Date.now()) {
+      return json({ error: 'Lineup is locked for this period' }, { status: 400 });
+    }
+
+    const { active_player_ids } = await request.json(); // array of player_id integers
+    if (!Array.isArray(active_player_ids)) {
+      return json({ error: 'active_player_ids must be an array' }, { status: 400 });
+    }
+
+    const cfg = mergeConfig(ctx.league.config_json);
+    const slots = getActiveSlots(cfg);
+    const players = await getTeamPlayers(db, teamId);
+    const playerMap = new Map(players.map(p => [p.player_id, p]));
+    const activeSet = new Set(active_player_ids.map(Number));
+
+    // Validate slot limits
+    const countByPos = { F: 0, D: 0, G: 0 };
+    for (const pid of activeSet) {
+      const p = playerMap.get(pid);
+      if (!p) return json({ error: `Player ${pid} not on this team` }, { status: 400 });
+      const pos = mapPosition(p.position);
+      countByPos[pos]++;
+    }
+    for (const [pos, count] of Object.entries(countByPos)) {
+      if (count > (slots[pos] ?? 0)) {
+        return json({ error: `Too many active ${pos} (max ${slots[pos]})` }, { status: 400 });
+      }
+    }
+
+    // Upsert all players
+    for (const p of players) {
+      const isActive = activeSet.has(p.player_id) ? 1 : 0;
+      await db.prepare(`
+        INSERT INTO active_roster (team_id, player_id, period_id, is_active)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(team_id, player_id, period_id) DO UPDATE SET is_active = excluded.is_active
+      `).bind(teamId, p.player_id, periodId, isActive).run();
+    }
+
+    return json({ success: true });
+  }
+
   // League-scoped teams
   const lgTeamsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams$/);
   if (lgTeamsMatch && request.method === 'GET') {
