@@ -9,7 +9,7 @@ function validateTiebreaker(val) {
   return null
 }
 
-export default function AddTeamModal({ onClose, onCreated, onUnauthorized }) {
+export default function AddTeamModal({ leagueId, onClose, onCreated }) {
   const [name, setName] = useState('')
   const [owner, setOwner] = useState('')
   const [tiebreaker, setTiebreaker] = useState('')
@@ -24,10 +24,9 @@ export default function AddTeamModal({ onClose, onCreated, onUnauthorized }) {
     setLoading(true)
     setError('')
     try {
-      const team = await api.createTeam(name.trim(), owner.trim(), tiebreaker.trim() || null)
+      const team = await api.leagues.createTeam(leagueId, name.trim(), owner.trim(), tiebreaker.trim() || null)
       onCreated(team)
     } catch (err) {
-      if (err.unauthorized) { onUnauthorized?.(); return }
       setError(err.message)
     } finally {
       setLoading(false)

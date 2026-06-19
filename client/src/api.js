@@ -16,14 +16,16 @@ function authHeaders() {
 }
 
 async function request(url, options = {}) {
+  const { headers, ...rest } = options
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options
+    credentials: 'include',
+    ...rest,
+    headers: { 'Content-Type': 'application/json', ...headers },
   });
   const data = await res.json();
   if (res.status === 401) {
     clearPassword()
-    const err = new Error('Unauthorized')
+    const err = new Error(data.error || 'Unauthorized')
     err.unauthorized = true
     throw err
   }
@@ -71,5 +73,70 @@ export const api = {
       throw err
     }
   },
-  refreshStats: () => mutate('/api/standings/refresh', { method: 'POST' })
+  refreshStats: () => mutate('/api/standings/refresh', { method: 'POST' }),
+
+  // Auth
+  auth: {
+    register: (data) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+    login: (identifier, password) => request('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier, password })
+    }),
+    logout: () => request('/api/auth/logout', { method: 'POST' }),
+    me: () => request('/api/auth/me'),
+  },
+
+  // Current user profile/settings
+  me: {
+    update: (data) => request('/api/me', { method: 'PATCH', body: JSON.stringify(data) }),
+    changePassword: (currentPassword, newPassword) => request('/api/me/password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword })
+    }),
+  },
+
+  // Leagues (multi-tenant)
+  leagues: {
+    mine: () => request('/api/me/leagues'),
+    create: (name) => request('/api/leagues', { method: 'POST', body: JSON.stringify({ name }) }),
+    get: (id) => request(`/api/leagues/${id}`),
+    update: (id, data) => request(`/api/leagues/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    getTeams: (id) => request(`/api/leagues/${id}/teams`),
+    createTeam: (id, name, owner, tiebreaker) => request(`/api/leagues/${id}/teams`, {
+      method: 'POST', body: JSON.stringify({ name, owner, tiebreaker })
+    }),
+    updateTeam: (id, teamId, name, owner, tiebreaker) => request(`/api/leagues/${id}/teams/${teamId}`, {
+      method: 'PUT', body: JSON.stringify({ name, owner, tiebreaker })
+    }),
+    deleteTeam: (id, teamId) => request(`/api/leagues/${id}/teams/${teamId}`, { method: 'DELETE' }),
+
+    getPlayers: (id, teamId) => request(`/api/leagues/${id}/teams/${teamId}/players`),
+    addPlayer: (id, teamId, player) => request(`/api/leagues/${id}/teams/${teamId}/players`, {
+      method: 'POST', body: JSON.stringify(player)
+    }),
+    removePlayer: (id, teamId, rowId) => request(`/api/leagues/${id}/teams/${teamId}/players/${rowId}`, {
+      method: 'DELETE'
+    }),
+
+    getStandings: (id) => request(`/api/leagues/${id}/standings`),
+    refreshStats: (id) => request(`/api/leagues/${id}/standings/refresh`, { method: 'POST' }),
+
+    // Player Explorer
+    explorer: (id) => request(`/api/leagues/${id}/players`),
+    player: (id, playerId) => request(`/api/leagues/${id}/players/${playerId}`),
+
+    // Commissioner
+    getMembers: (id) => request(`/api/leagues/${id}/members`),
+    removeMember: (id, userId) => request(`/api/leagues/${id}/members/${userId}`, { method: 'DELETE' }),
+    getInvites: (id) => request(`/api/leagues/${id}/invites`),
+    createInvite: (id, opts) => request(`/api/leagues/${id}/invites`, { method: 'POST', body: JSON.stringify(opts || {}) }),
+    revokeInvite: (id, inviteId) => request(`/api/leagues/${id}/invites/${inviteId}`, { method: 'DELETE' }),
+  },
+
+  // Invite codes (public preview + join)
+  invites: {
+    preview: (code) => request(`/api/invites/${code}`),
+    join: (code) => request(`/api/invites/${code}/join`, { method: 'POST' }),
+  }
 };

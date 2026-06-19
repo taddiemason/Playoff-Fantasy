@@ -1,12 +1,27 @@
+import {
+  hashPassword,
+  verifyPassword,
+  createSession,
+  getSessionUser,
+  deleteSession,
+  sessionCookie,
+  clearCookie,
+  parseCookies,
+} from './auth.js';
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const STATS_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
-const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh
-let lastSuccessfulStandings = null;
+const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh (shared raw NHL data)
 
-// Tracks goalies that have ever had gamesPlayed > 0. Once a goalie is confirmed
-// active they stay in the ranking pool even if a transient NHL API response
-// comes back without their playoff entry, preventing repeated rank shifts.
-const confirmedActiveGoalies = new Map(); // playerId → last known normalized stats
+// Standings state is keyed per league so leagues never clobber each other's
+// goalie pools or cached results. The key is the league id (or '__global__'
+// for the legacy single-pool standings endpoint).
+const lastSuccessfulStandingsByLeague = new Map(); // cacheKey → last good result
+
+// Tracks goalies that have ever had gamesPlayed > 0, per league. Once a goalie is
+// confirmed active they stay in that league's ranking pool even if a transient
+// NHL API response comes back without their playoff entry.
+const confirmedActiveGoaliesByLeague = new Map(); // cacheKey → Map(playerId → stats)
 
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
@@ -151,6 +166,41 @@ async function getEliminatedTeams(season, db) {
   }
 }
 
+function normalizeEmail(email) {
+  return (email || '').trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isValidUsername(username) {
+  return !!username && username.length >= 3 && username.length <= 20 && /^[A-Za-z0-9_]+$/.test(username);
+}
+
+function publicUser(row) {
+  return {
+    id: row.id,
+    email: row.email,
+    username: row.username,
+    avatar_url: row.avatar_url || '',
+    is_site_admin: !!row.is_site_admin,
+  };
+}
+
+function validateCredentials(email, username, password) {
+  if (!isValidEmail(email)) return 'Enter a valid email';
+  if (!isValidUsername(username)) return 'Username must be 3–20 letters, numbers, or underscores';
+  if (!password || password.length < 8) return 'Password must be at least 8 characters';
+  return null;
+}
+
+function uniqueConflictMessage(err) {
+  const msg = err?.message || '';
+  if (!/UNIQUE/i.test(msg)) return null;
+  return msg.includes('email') ? 'That email is already registered' : 'That username is taken';
+}
+
 function requireAuth(request, env) {
   const expected = env.ADMIN_PASSWORD
   if (!expected) return null
@@ -171,8 +221,160 @@ function parseId(value) {
   return Number.isFinite(id) ? id : null;
 }
 
+// ── League config ───────────────────────────────────────────────────────────
+const DEFAULT_LEAGUE_CONFIG = {
+  scoring: {
+    skater: { goal: 2, assist: 1, specialTeamsPointBonus: 1, pim: 0.5 },
+    goalie: { win: 2, shutout: 3, gaaRank: true, svpRank: true },
+  },
+  roster: { maxF: 10, maxD: 5, maxG: 3, maxSameTeamF: 3, maxSameTeamD: 2 },
+  lock: { lockedAt: null, rule: 'Before puck drop of Game 1' },
+  payout: [
+    { minEntries: 0, split: 'Winner takes all' },
+    { minEntries: 7, split: '75% to 1st · 25% to 2nd' },
+    { minEntries: 12, split: '60% to 1st · 25% to 2nd · 15% to 3rd' },
+  ],
+  tiebreaker: { type: 'cupGoalieSavePct' },
+  description: '',
+  commissionerNotes: '',
+};
+
+function mergeConfig(stored) {
+  let parsed = {};
+  if (stored) {
+    try { parsed = typeof stored === 'string' ? JSON.parse(stored) : stored; } catch { parsed = {}; }
+  }
+  const d = DEFAULT_LEAGUE_CONFIG;
+  return {
+    ...d,
+    ...parsed,
+    scoring: {
+      skater: { ...d.scoring.skater, ...(parsed.scoring?.skater) },
+      goalie: { ...d.scoring.goalie, ...(parsed.scoring?.goalie) },
+    },
+    roster: { ...d.roster, ...(parsed.roster) },
+    lock: { ...d.lock, ...(parsed.lock) },
+    payout: Array.isArray(parsed.payout) ? parsed.payout : d.payout,
+    tiebreaker: { ...d.tiebreaker, ...(parsed.tiebreaker) },
+  };
+}
+
+const INVITE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function generateInviteCode(len = 8) {
+  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  return [...bytes].map((b) => INVITE_ALPHABET[b % INVITE_ALPHABET.length]).join('');
+}
+
+function mapPosition(code) {
+  const c = (code || '').toUpperCase();
+  if (c === 'G') return 'G';
+  if (c === 'D') return 'D';
+  return 'F';
+}
+
+// Fantasy points for a player viewed outside the standings pipeline (Player
+// Explorer search of a non-rostered player). Goalie rank points require the
+// league's goalie pool, so they're omitted here and `partial` is flagged.
+function scorePlayerStandalone(position, stats, cfg) {
+  if (!stats) return { points: 0, breakdown: {}, partial: position === 'G' };
+  if (position === 'G') {
+    const winsPoints = (stats.wins ?? 0) * cfg.scoring.goalie.win;
+    const shutoutPoints = (stats.shutouts ?? 0) * cfg.scoring.goalie.shutout;
+    return {
+      points: Math.round((winsPoints + shutoutPoints) * 10) / 10,
+      breakdown: { winsPoints, shutoutPoints, gaaRank: null, svpRank: null },
+      partial: true,
+    };
+  }
+  const goalPoints = (stats.goals ?? 0) * cfg.scoring.skater.goal;
+  const assistPoints = (stats.assists ?? 0) * cfg.scoring.skater.assist;
+  const stPoints =
+    ((stats.ppGoals ?? 0) + (stats.ppAssists ?? 0) + (stats.shGoals ?? 0) + (stats.shAssists ?? 0)) *
+    cfg.scoring.skater.specialTeamsPointBonus;
+  const pimPoints = (stats.penaltyMinutes ?? 0) * cfg.scoring.skater.pim;
+  const pmPoints = stats.plusMinus ?? 0;
+  return {
+    points: Math.round((goalPoints + assistPoints + stPoints + pimPoints + pmPoints) * 10) / 10,
+    breakdown: { goalPoints, assistPoints, stPoints, pimPoints, pmPoints },
+    partial: false,
+  };
+}
+
+// ── League access ───────────────────────────────────────────────────────────
+async function getLeague(db, leagueId) {
+  return db.prepare('SELECT * FROM leagues WHERE id = ?').bind(leagueId).first();
+}
+
+async function getMembershipRole(db, leagueId, userId) {
+  if (!userId) return null;
+  const row = await db
+    .prepare('SELECT role FROM league_members WHERE league_id = ? AND user_id = ?')
+    .bind(leagueId, userId)
+    .first();
+  return row ? row.role : null;
+}
+
+function isCommissioner(league, role, userId) {
+  return role === 'commissioner' || (league && league.owner_user_id === userId);
+}
+
+function publicLeague(league, extra = {}) {
+  return {
+    id: league.id,
+    name: league.name,
+    owner_user_id: league.owner_user_id,
+    season: league.season,
+    is_locked: !!league.is_locked,
+    invite_code: league.invite_code,
+    config: mergeConfig(league.config_json),
+    created_at: league.created_at,
+    ...extra,
+  };
+}
+
+function inviteStatus(invite) {
+  if (invite.revoked_at) return 'revoked';
+  if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) return 'expired';
+  if (invite.max_uses != null && invite.use_count >= invite.max_uses) return 'used up';
+  return 'active';
+}
+
+// Resolves an invite code to its league. Accepts both an `invites` row code and a
+// league's permanent `invite_code`. Returns { invite, league, active }.
+async function resolveInviteCode(db, code) {
+  const invite = await db.prepare('SELECT * FROM invites WHERE code = ?').bind(code).first();
+  if (invite) {
+    const league = await getLeague(db, invite.league_id);
+    return { invite, league, active: inviteStatus(invite) === 'active' && !!league };
+  }
+  const league = await db.prepare('SELECT * FROM leagues WHERE invite_code = ?').bind(code).first();
+  if (league) return { invite: null, league, active: true };
+  return { invite: null, league: null, active: false };
+}
+
+// Resolves { user, league, role } for a league-scoped request, or { error } with
+// a ready-to-return Response. Owners are always treated as commissioners.
+async function loadLeagueContext(db, request, leagueId) {
+  const league = await getLeague(db, leagueId);
+  if (!league) return { error: json({ error: 'League not found' }, { status: 404 }) };
+  const user = await getSessionUser(db, request);
+  if (!user) return { error: json({ error: 'Unauthorized' }, { status: 401 }) };
+  let role = await getMembershipRole(db, league.id, user.id);
+  if (league.owner_user_id === user.id) role = 'commissioner';
+  if (!role) return { error: json({ error: 'Not a member of this league' }, { status: 403 }) };
+  return { user, league, role };
+}
+
 async function getTeams(db) {
   const { results } = await db.prepare('SELECT * FROM teams ORDER BY created_at DESC').all();
+  return results || [];
+}
+
+async function getLeagueTeams(db, leagueId) {
+  const { results } = await db
+    .prepare('SELECT * FROM teams WHERE league_id = ? ORDER BY created_at DESC')
+    .bind(leagueId)
+    .all();
   return results || [];
 }
 
@@ -260,6 +462,651 @@ function isSnapshotFresh(fetchedAt, ttlMs = STATS_SNAPSHOT_TTL_MS) {
 
 async function handleApi(request, env, pathname) {
   const db = env.DB;
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  if (pathname === '/api/auth/register' && request.method === 'POST') {
+    const { email, username, password } = await request.json();
+    const e = normalizeEmail(email);
+    const u = (username || '').trim();
+    const vErr = validateCredentials(e, u, password);
+    if (vErr) return json({ error: vErr }, { status: 400 });
+    try {
+      const hash = await hashPassword(password);
+      const row = await db
+        .prepare(
+          `INSERT INTO users (email, username, password_hash) VALUES (?, ?, ?)
+           RETURNING id, email, username, avatar_url, is_site_admin`
+        )
+        .bind(e, u, hash)
+        .first();
+      const token = await createSession(db, row.id);
+      return json({ user: publicUser(row) }, { headers: { 'Set-Cookie': sessionCookie(token, request) } });
+    } catch (err) {
+      const conflict = uniqueConflictMessage(err);
+      if (conflict) return json({ error: conflict }, { status: 400 });
+      return json({ error: 'Failed to create account' }, { status: 500 });
+    }
+  }
+
+  if (pathname === '/api/auth/login' && request.method === 'POST') {
+    const { identifier, password } = await request.json();
+    const id = (identifier || '').trim();
+    if (!id || !password) return json({ error: 'Enter your login and password' }, { status: 400 });
+    const row = await db
+      .prepare(
+        `SELECT id, email, username, avatar_url, is_site_admin, password_hash
+         FROM users WHERE email = ? OR username = ?`
+      )
+      .bind(id.toLowerCase(), id)
+      .first();
+    if (!row || !(await verifyPassword(password, row.password_hash))) {
+      return json({ error: 'Invalid login or password' }, { status: 401 });
+    }
+    const token = await createSession(db, row.id);
+    return json({ user: publicUser(row) }, { headers: { 'Set-Cookie': sessionCookie(token, request) } });
+  }
+
+  if (pathname === '/api/auth/logout' && request.method === 'POST') {
+    await deleteSession(db, request);
+    return json({ success: true }, { headers: { 'Set-Cookie': clearCookie(request) } });
+  }
+
+  if (pathname === '/api/auth/me' && request.method === 'GET') {
+    const user = await getSessionUser(db, request);
+    return json({ user });
+  }
+
+  // Admin-issued reset (no email provider yet). Site admin sets a user's password.
+  if (pathname === '/api/auth/reset-password' && request.method === 'POST') {
+    const actor = await getSessionUser(db, request);
+    if (!actor?.is_site_admin) return json({ error: 'Unauthorized' }, { status: 401 });
+    const { email, newPassword } = await request.json();
+    if (!newPassword || newPassword.length < 8) {
+      return json({ error: 'New password must be at least 8 characters' }, { status: 400 });
+    }
+    const target = await db.prepare('SELECT id FROM users WHERE email = ?').bind(normalizeEmail(email)).first();
+    if (!target) return json({ error: 'No user with that email' }, { status: 404 });
+    const hash = await hashPassword(newPassword);
+    await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(hash, target.id).run();
+    await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(target.id).run();
+    return json({ success: true });
+  }
+
+  // ── Current user (profile/settings) ────────────────────────────────────────
+  if (pathname === '/api/me' && request.method === 'PATCH') {
+    const user = await getSessionUser(db, request);
+    if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+    const body = await request.json();
+    const fields = [];
+    const values = [];
+    if (body.username !== undefined) {
+      const u = (body.username || '').trim();
+      if (!isValidUsername(u)) return json({ error: 'Username must be 3–20 letters, numbers, or underscores' }, { status: 400 });
+      fields.push('username = ?'); values.push(u);
+    }
+    if (body.email !== undefined) {
+      const e = normalizeEmail(body.email);
+      if (!isValidEmail(e)) return json({ error: 'Enter a valid email' }, { status: 400 });
+      fields.push('email = ?'); values.push(e);
+    }
+    if (body.avatar_url !== undefined) {
+      fields.push('avatar_url = ?'); values.push((body.avatar_url || '').trim());
+    }
+    if (!fields.length) return json({ error: 'Nothing to update' }, { status: 400 });
+    try {
+      const row = await db
+        .prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ? RETURNING id, email, username, avatar_url, is_site_admin`)
+        .bind(...values, user.id)
+        .first();
+      return json({ user: publicUser(row) });
+    } catch (err) {
+      const conflict = uniqueConflictMessage(err);
+      if (conflict) return json({ error: conflict }, { status: 400 });
+      return json({ error: 'Failed to update profile' }, { status: 500 });
+    }
+  }
+
+  if (pathname === '/api/me/password' && request.method === 'POST') {
+    const user = await getSessionUser(db, request);
+    if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+    const { currentPassword, newPassword } = await request.json();
+    if (!newPassword || newPassword.length < 8) {
+      return json({ error: 'New password must be at least 8 characters' }, { status: 400 });
+    }
+    const row = await db.prepare('SELECT password_hash FROM users WHERE id = ?').bind(user.id).first();
+    if (!row || !(await verifyPassword(currentPassword || '', row.password_hash))) {
+      return json({ error: 'Current password is incorrect' }, { status: 400 });
+    }
+    const hash = await hashPassword(newPassword);
+    await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(hash, user.id).run();
+    // Invalidate other sessions, keep the current one alive.
+    const currentToken = parseCookies(request).sid || '';
+    await db.prepare('DELETE FROM sessions WHERE user_id = ? AND id != ?').bind(user.id, currentToken).run();
+    return json({ success: true });
+  }
+
+  // ── Site admin bootstrap ────────────────────────────────────────────────────
+  // Guarded by ADMIN_PASSWORD (the only secret that exists pre-accounts).
+  // Idempotent: creates/promotes the admin user and migrates any orphaned teams
+  // (the pre-accounts pool) into a single league the admin owns.
+  if (pathname === '/api/admin/bootstrap' && request.method === 'POST') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
+    const body = await request.json();
+    const e = normalizeEmail(body.email);
+    const u = (body.username || '').trim();
+
+    let user = await db
+      .prepare('SELECT id, email, username, avatar_url, is_site_admin FROM users WHERE email = ?')
+      .bind(e)
+      .first();
+    if (!user) {
+      const vErr = validateCredentials(e, u, body.password);
+      if (vErr) return json({ error: vErr }, { status: 400 });
+      try {
+        const hash = await hashPassword(body.password);
+        user = await db
+          .prepare(
+            `INSERT INTO users (email, username, password_hash, is_site_admin) VALUES (?, ?, ?, 1)
+             RETURNING id, email, username, avatar_url, is_site_admin`
+          )
+          .bind(e, u, hash)
+          .first();
+      } catch (err) {
+        const conflict = uniqueConflictMessage(err);
+        if (conflict) return json({ error: conflict }, { status: 400 });
+        return json({ error: 'Bootstrap failed' }, { status: 500 });
+      }
+    } else if (!user.is_site_admin) {
+      await db.prepare('UPDATE users SET is_site_admin = 1 WHERE id = ?').bind(user.id).run();
+      user.is_site_admin = 1;
+    }
+
+    const orphan = await db.prepare('SELECT COUNT(*) AS c FROM teams WHERE league_id IS NULL').first();
+    let migratedLeague = null;
+    if ((orphan?.c ?? 0) > 0) {
+      const league = await db
+        .prepare(
+          `INSERT INTO leagues (name, owner_user_id, season, config_json, invite_code)
+           VALUES (?, ?, ?, ?, ?) RETURNING *`
+        )
+        .bind('SHLOB Playoff Hockey', user.id, getCurrentSeason(), JSON.stringify(DEFAULT_LEAGUE_CONFIG), generateInviteCode())
+        .first();
+      await db.prepare('INSERT OR IGNORE INTO league_members (league_id, user_id, role) VALUES (?, ?, ?)')
+        .bind(league.id, user.id, 'commissioner').run();
+      await db.prepare('UPDATE teams SET league_id = ?, user_id = ? WHERE league_id IS NULL')
+        .bind(league.id, user.id).run();
+      migratedLeague = publicLeague(league, { migratedTeams: orphan.c });
+    }
+
+    return json({ user: publicUser(user), migratedLeague });
+  }
+
+  // ── Leagues ─────────────────────────────────────────────────────────────────
+  if (pathname === '/api/me/leagues' && request.method === 'GET') {
+    const user = await getSessionUser(db, request);
+    if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+    const { results } = await db
+      .prepare(
+        `SELECT l.*, lm.role AS my_role,
+                (SELECT COUNT(*) FROM league_members m WHERE m.league_id = l.id) AS member_count,
+                (SELECT COUNT(*) FROM teams t WHERE t.league_id = l.id) AS team_count
+         FROM league_members lm JOIN leagues l ON l.id = lm.league_id
+         WHERE lm.user_id = ?
+         ORDER BY l.created_at DESC`
+      )
+      .bind(user.id)
+      .all();
+    const leagues = (results || []).map((l) =>
+      publicLeague(l, {
+        role: l.my_role,
+        memberCount: l.member_count,
+        teamCount: l.team_count,
+        isOwner: l.owner_user_id === user.id,
+      })
+    );
+    const { results: pend } = await db
+      .prepare(
+        `SELECT i.code, i.league_id, l.name AS league_name
+         FROM invites i JOIN leagues l ON l.id = i.league_id
+         WHERE i.email = ? AND i.revoked_at IS NULL
+           AND (i.expires_at IS NULL OR i.expires_at > ?)
+           AND (i.max_uses IS NULL OR i.use_count < i.max_uses)
+           AND NOT EXISTS (SELECT 1 FROM league_members m WHERE m.league_id = i.league_id AND m.user_id = ?)
+         ORDER BY i.created_at DESC`
+      )
+      .bind(user.email, new Date().toISOString(), user.id)
+      .all();
+    const invites = (pend || []).map((r) => ({ code: r.code, leagueId: r.league_id, leagueName: r.league_name }));
+
+    return json({
+      owned: leagues.filter((l) => l.isOwner),
+      joined: leagues.filter((l) => !l.isOwner),
+      invites,
+    });
+  }
+
+  if (pathname === '/api/leagues' && request.method === 'POST') {
+    const user = await getSessionUser(db, request);
+    if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+    const { name } = await request.json();
+    if (!name?.trim()) return json({ error: 'League name required' }, { status: 400 });
+    const league = await db
+      .prepare(
+        `INSERT INTO leagues (name, owner_user_id, season, config_json, invite_code)
+         VALUES (?, ?, ?, ?, ?) RETURNING *`
+      )
+      .bind(name.trim(), user.id, getCurrentSeason(), JSON.stringify(DEFAULT_LEAGUE_CONFIG), generateInviteCode())
+      .first();
+    await db.prepare('INSERT INTO league_members (league_id, user_id, role) VALUES (?, ?, ?)')
+      .bind(league.id, user.id, 'commissioner').run();
+    return json(publicLeague(league, { role: 'commissioner', memberCount: 1, teamCount: 0, isOwner: true }));
+  }
+
+  const leagueMatch = pathname.match(/^\/api\/leagues\/(\d+)$/);
+  if (leagueMatch && request.method === 'GET') {
+    const leagueId = parseId(leagueMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const mc = await db.prepare('SELECT COUNT(*) AS c FROM league_members WHERE league_id = ?').bind(leagueId).first();
+    return json(publicLeague(ctx.league, {
+      role: ctx.role,
+      isOwner: ctx.league.owner_user_id === ctx.user.id,
+      memberCount: mc?.c ?? 0,
+    }));
+  }
+
+  if (leagueMatch && request.method === 'PATCH') {
+    const leagueId = parseId(leagueMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const body = await request.json();
+    const fields = [];
+    const values = [];
+    if (body.name !== undefined) {
+      if (!body.name.trim()) return json({ error: 'League name required' }, { status: 400 });
+      fields.push('name = ?'); values.push(body.name.trim());
+    }
+    if (body.config !== undefined) {
+      const merged = mergeConfig({ ...mergeConfig(ctx.league.config_json), ...body.config });
+      fields.push('config_json = ?'); values.push(JSON.stringify(merged));
+    }
+    if (body.is_locked !== undefined) {
+      fields.push('is_locked = ?'); values.push(body.is_locked ? 1 : 0);
+    }
+    if (!fields.length) return json({ error: 'Nothing to update' }, { status: 400 });
+    const league = await db.prepare(`UPDATE leagues SET ${fields.join(', ')} WHERE id = ? RETURNING *`).bind(...values, leagueId).first();
+    return json(publicLeague(league, { role: ctx.role, isOwner: league.owner_user_id === ctx.user.id }));
+  }
+
+  // League-scoped teams
+  const lgTeamsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams$/);
+  if (lgTeamsMatch && request.method === 'GET') {
+    const leagueId = parseId(lgTeamsMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    return json(await getLeagueTeams(db, leagueId));
+  }
+
+  if (lgTeamsMatch && request.method === 'POST') {
+    const leagueId = parseId(lgTeamsMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (ctx.league.is_locked && !isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+      return json({ error: 'League is locked' }, { status: 403 });
+    }
+    const { name, owner, tiebreaker } = await request.json();
+    if (!name?.trim()) return json({ error: 'Team name required' }, { status: 400 });
+    try {
+      const team = await db
+        .prepare(`INSERT INTO teams (league_id, user_id, name, owner, tiebreaker) VALUES (?, ?, ?, ?, ?) RETURNING *`)
+        .bind(leagueId, ctx.user.id, name.trim(), owner?.trim() || '', tiebreaker?.trim() || null)
+        .first();
+      return json(team);
+    } catch (err) {
+      if (/UNIQUE/i.test(err?.message || '')) return json({ error: 'A team with that name already exists in this league' }, { status: 400 });
+      return json({ error: 'Failed to create team' }, { status: 500 });
+    }
+  }
+
+  const lgTeamMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams\/(\d+)$/);
+  if (lgTeamMatch && (request.method === 'PUT' || request.method === 'DELETE')) {
+    const leagueId = parseId(lgTeamMatch[1]);
+    const teamId = parseId(lgTeamMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const team = await db.prepare('SELECT * FROM teams WHERE id = ? AND league_id = ?').bind(teamId, leagueId).first();
+    if (!team) return json({ error: 'Team not found' }, { status: 404 });
+    const canModify = team.user_id === ctx.user.id || isCommissioner(ctx.league, ctx.role, ctx.user.id);
+    if (!canModify) return json({ error: 'You can only edit your own team' }, { status: 403 });
+
+    if (request.method === 'DELETE') {
+      await db.prepare('DELETE FROM teams WHERE id = ?').bind(teamId).run();
+      return json({ success: true });
+    }
+    const { name, owner, tiebreaker } = await request.json();
+    if (!name?.trim()) return json({ error: 'Team name required' }, { status: 400 });
+    try {
+      await db.prepare('UPDATE teams SET name = ?, owner = ?, tiebreaker = ? WHERE id = ?')
+        .bind(name.trim(), owner?.trim() || '', tiebreaker?.trim() || null, teamId).run();
+      return json({ success: true });
+    } catch (err) {
+      if (/UNIQUE/i.test(err?.message || '')) return json({ error: 'A team with that name already exists in this league' }, { status: 400 });
+      return json({ error: 'Failed to update team' }, { status: 500 });
+    }
+  }
+
+  // League-scoped players
+  const lgPlayersMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams\/(\d+)\/players$/);
+  if (lgPlayersMatch && request.method === 'GET') {
+    const leagueId = parseId(lgPlayersMatch[1]);
+    const teamId = parseId(lgPlayersMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    return json(await getTeamPlayers(db, teamId));
+  }
+
+  if (lgPlayersMatch && request.method === 'POST') {
+    const leagueId = parseId(lgPlayersMatch[1]);
+    const teamId = parseId(lgPlayersMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const team = await db.prepare('SELECT * FROM teams WHERE id = ? AND league_id = ?').bind(teamId, leagueId).first();
+    if (!team) return json({ error: 'Team not found' }, { status: 404 });
+    const canModify = team.user_id === ctx.user.id || isCommissioner(ctx.league, ctx.role, ctx.user.id);
+    if (!canModify) return json({ error: 'You can only edit your own team' }, { status: 403 });
+    if (ctx.league.is_locked && !isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+      return json({ error: 'League is locked' }, { status: 403 });
+    }
+    const { player_id, player_name, nhl_team, position, position_detail, headshot_url } = await request.json();
+    if (!player_id || !player_name || !position) return json({ error: 'Missing required fields' }, { status: 400 });
+
+    const caps = mergeConfig(ctx.league.config_json).roster;
+    const players = await getTeamPlayers(db, teamId);
+    const forwards = players.filter((p) => p.position === 'F');
+    const defensemen = players.filter((p) => p.position === 'D');
+    const goalies = players.filter((p) => p.position === 'G');
+    if (position === 'F' && forwards.length >= caps.maxF) return json({ error: `Maximum ${caps.maxF} forwards allowed per team` }, { status: 400 });
+    if (position === 'D' && defensemen.length >= caps.maxD) return json({ error: `Maximum ${caps.maxD} defensemen allowed per team` }, { status: 400 });
+    if (position === 'G' && goalies.length >= caps.maxG) return json({ error: `Maximum ${caps.maxG} goalies allowed per team` }, { status: 400 });
+    if (position === 'F' && forwards.filter((p) => p.nhl_team === nhl_team).length >= caps.maxSameTeamF) {
+      return json({ error: `Max ${caps.maxSameTeamF} forwards from ${nhl_team} allowed` }, { status: 400 });
+    }
+    if (position === 'D' && defensemen.filter((p) => p.nhl_team === nhl_team).length >= caps.maxSameTeamD) {
+      return json({ error: `Max ${caps.maxSameTeamD} defensemen from ${nhl_team} allowed` }, { status: 400 });
+    }
+    try {
+      const result = await db
+        .prepare(`INSERT INTO team_players
+          (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`)
+        .bind(teamId, player_id, player_name, nhl_team || '', position, position_detail || '', normalizeHeadshotUrl(headshot_url), teamCrestUrl(nhl_team))
+        .first();
+      return json(result);
+    } catch {
+      return json({ error: 'Player is already on this team' }, { status: 400 });
+    }
+  }
+
+  const lgRemovePlayerMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams\/(\d+)\/players\/(\d+)$/);
+  if (lgRemovePlayerMatch && request.method === 'DELETE') {
+    const leagueId = parseId(lgRemovePlayerMatch[1]);
+    const teamId = parseId(lgRemovePlayerMatch[2]);
+    const rowId = parseId(lgRemovePlayerMatch[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const team = await db.prepare('SELECT * FROM teams WHERE id = ? AND league_id = ?').bind(teamId, leagueId).first();
+    if (!team) return json({ error: 'Team not found' }, { status: 404 });
+    const canModify = team.user_id === ctx.user.id || isCommissioner(ctx.league, ctx.role, ctx.user.id);
+    if (!canModify) return json({ error: 'You can only edit your own team' }, { status: 403 });
+    if (ctx.league.is_locked && !isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+      return json({ error: 'League is locked' }, { status: 403 });
+    }
+    await db.prepare('DELETE FROM team_players WHERE id = ? AND team_id = ?').bind(rowId, teamId).run();
+    return json({ success: true });
+  }
+
+  // League-scoped standings
+  const lgStandingsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/standings$/);
+  if (lgStandingsMatch && request.method === 'GET') {
+    const leagueId = parseId(lgStandingsMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const result = await computeStandings(db, { leagueId, season: ctx.league.season, config: mergeConfig(ctx.league.config_json) });
+    return json(result);
+  }
+
+  const lgRefreshMatch = pathname.match(/^\/api\/leagues\/(\d+)\/standings\/refresh$/);
+  if (lgRefreshMatch && request.method === 'POST') {
+    const leagueId = parseId(lgRefreshMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    clearNhlCache();
+    return json({ success: true });
+  }
+
+  // ── Commissioner: members ───────────────────────────────────────────────────
+  const lgMembersMatch = pathname.match(/^\/api\/leagues\/(\d+)\/members$/);
+  if (lgMembersMatch && request.method === 'GET') {
+    const leagueId = parseId(lgMembersMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const { results } = await db
+      .prepare(
+        `SELECT lm.user_id, lm.role, u.username, u.email, u.avatar_url,
+                (SELECT COUNT(*) FROM teams t WHERE t.league_id = lm.league_id AND t.user_id = lm.user_id) AS team_count
+         FROM league_members lm JOIN users u ON u.id = lm.user_id
+         WHERE lm.league_id = ?
+         ORDER BY lm.role DESC, u.username`
+      )
+      .bind(leagueId)
+      .all();
+    const members = (results || []).map((m) => ({
+      user_id: m.user_id,
+      username: m.username,
+      email: m.email,
+      avatar_url: m.avatar_url || '',
+      role: m.role,
+      teamCount: m.team_count,
+      isOwner: m.user_id === ctx.league.owner_user_id,
+    }));
+    return json(members);
+  }
+
+  const lgMemberMatch = pathname.match(/^\/api\/leagues\/(\d+)\/members\/(\d+)$/);
+  if (lgMemberMatch && request.method === 'DELETE') {
+    const leagueId = parseId(lgMemberMatch[1]);
+    const targetUserId = parseId(lgMemberMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    if (targetUserId === ctx.league.owner_user_id) return json({ error: 'Cannot remove the league owner' }, { status: 400 });
+    await db.prepare('DELETE FROM teams WHERE league_id = ? AND user_id = ?').bind(leagueId, targetUserId).run();
+    await db.prepare('DELETE FROM league_members WHERE league_id = ? AND user_id = ?').bind(leagueId, targetUserId).run();
+    return json({ success: true });
+  }
+
+  // ── Commissioner: invites ───────────────────────────────────────────────────
+  const lgInvitesMatch = pathname.match(/^\/api\/leagues\/(\d+)\/invites$/);
+  if (lgInvitesMatch && request.method === 'GET') {
+    const leagueId = parseId(lgInvitesMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const { results } = await db.prepare('SELECT * FROM invites WHERE league_id = ? ORDER BY created_at DESC').bind(leagueId).all();
+    const invites = (results || []).map((i) => ({
+      id: i.id, code: i.code, email: i.email, max_uses: i.max_uses, use_count: i.use_count,
+      expires_at: i.expires_at, created_at: i.created_at, status: inviteStatus(i),
+    }));
+    return json({ invites, leagueCode: ctx.league.invite_code });
+  }
+
+  if (lgInvitesMatch && request.method === 'POST') {
+    const leagueId = parseId(lgInvitesMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const body = await request.json().catch(() => ({}));
+    const maxUses = Number.isFinite(body.maxUses) && body.maxUses > 0 ? Math.floor(body.maxUses) : null;
+    const email = body.email ? normalizeEmail(body.email) : null;
+    let expiresAt = null;
+    if (Number.isFinite(body.expiresInDays) && body.expiresInDays > 0) {
+      expiresAt = new Date(Date.now() + body.expiresInDays * 86400000).toISOString();
+    }
+    const invite = await db
+      .prepare(
+        `INSERT INTO invites (league_id, code, created_by, email, max_uses, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING *`
+      )
+      .bind(leagueId, generateInviteCode(), ctx.user.id, email, maxUses, expiresAt)
+      .first();
+    return json({ id: invite.id, code: invite.code, email: invite.email, max_uses: invite.max_uses, use_count: invite.use_count, expires_at: invite.expires_at, created_at: invite.created_at, status: inviteStatus(invite) });
+  }
+
+  const lgInviteMatch = pathname.match(/^\/api\/leagues\/(\d+)\/invites\/(\d+)$/);
+  if (lgInviteMatch && request.method === 'DELETE') {
+    const leagueId = parseId(lgInviteMatch[1]);
+    const inviteId = parseId(lgInviteMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    await db.prepare('UPDATE invites SET revoked_at = ? WHERE id = ? AND league_id = ?')
+      .bind(new Date().toISOString(), inviteId, leagueId).run();
+    return json({ success: true });
+  }
+
+  // ── Invites: public preview + join ──────────────────────────────────────────
+  const invitePreviewMatch = pathname.match(/^\/api\/invites\/([A-Za-z0-9]+)$/);
+  if (invitePreviewMatch && request.method === 'GET') {
+    const code = invitePreviewMatch[1];
+    const { league, active } = await resolveInviteCode(db, code);
+    if (!league) return json({ valid: false, error: 'Invite not found' }, { status: 404 });
+    const mc = await db.prepare('SELECT COUNT(*) AS c FROM league_members WHERE league_id = ?').bind(league.id).first();
+    const user = await getSessionUser(db, request);
+    const alreadyMember = user ? !!(await getMembershipRole(db, league.id, user.id)) || league.owner_user_id === user.id : false;
+    return json({
+      valid: active,
+      error: active ? null : 'This invite is no longer valid',
+      league: { id: league.id, name: league.name, memberCount: mc?.c ?? 0 },
+      alreadyMember,
+      loggedIn: !!user,
+    });
+  }
+
+  const inviteJoinMatch = pathname.match(/^\/api\/invites\/([A-Za-z0-9]+)\/join$/);
+  if (inviteJoinMatch && request.method === 'POST') {
+    const code = inviteJoinMatch[1];
+    const user = await getSessionUser(db, request);
+    if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+    const { invite, league, active } = await resolveInviteCode(db, code);
+    if (!league) return json({ error: 'Invite not found' }, { status: 404 });
+
+    const existing = await getMembershipRole(db, league.id, user.id);
+    if (existing || league.owner_user_id === user.id) {
+      return json({ league: { id: league.id, name: league.name }, alreadyMember: true });
+    }
+    if (!active) return json({ error: 'This invite is no longer valid' }, { status: 400 });
+
+    await db.prepare('INSERT OR IGNORE INTO league_members (league_id, user_id, role) VALUES (?, ?, ?)')
+      .bind(league.id, user.id, 'member').run();
+    if (invite) {
+      await db.prepare('UPDATE invites SET use_count = use_count + 1 WHERE id = ?').bind(invite.id).run();
+    }
+    return json({ league: { id: league.id, name: league.name }, alreadyMember: false });
+  }
+
+  // ── Player Explorer ─────────────────────────────────────────────────────────
+  const explorerMatch = pathname.match(/^\/api\/leagues\/(\d+)\/players$/);
+  if (explorerMatch && request.method === 'GET') {
+    const leagueId = parseId(explorerMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const cfg = mergeConfig(ctx.league.config_json);
+    const standings = await computeStandings(db, { leagueId, season: ctx.league.season, config: cfg });
+    const totalTeams = standings.standings.length;
+    const elimSet = new Set((standings.eliminatedTeams || []).map((t) => (t || '').trim().toUpperCase()));
+    const map = new Map();
+    for (const team of standings.standings) {
+      for (const p of team.players) {
+        let e = map.get(p.player_id);
+        if (!e) {
+          e = {
+            playerId: p.player_id, name: p.player_name, position: p.position,
+            position_detail: p.position_detail, nhl_team: p.nhl_team, headshot_url: p.headshot_url,
+            crest_url: p.crest_url, stats: p.stats, points: p.points, breakdown: p.breakdown,
+            owners: [], eliminated: elimSet.has((p.nhl_team || '').trim().toUpperCase()),
+          };
+          map.set(p.player_id, e);
+        }
+        e.owners.push({ teamId: team.id, teamName: team.name, owner: team.owner });
+      }
+    }
+    const players = [...map.values()]
+      .map((p) => ({ ...p, ownerCount: p.owners.length, ownershipPct: totalTeams ? Math.round((p.owners.length / totalTeams) * 100) : 0 }))
+      .sort((a, b) => (b.points || 0) - (a.points || 0));
+    return json({ players, totalTeams, season: standings.season });
+  }
+
+  const playerDetailMatch = pathname.match(/^\/api\/leagues\/(\d+)\/players\/(\d+)$/);
+  if (playerDetailMatch && request.method === 'GET') {
+    const leagueId = parseId(playerDetailMatch[1]);
+    const playerId = parseId(playerDetailMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const cfg = mergeConfig(ctx.league.config_json);
+    const season = ctx.league.season;
+    const standings = await computeStandings(db, { leagueId, season, config: cfg });
+    const totalTeams = standings.standings.length;
+    const elimSet = new Set((standings.eliminatedTeams || []).map((t) => (t || '').trim().toUpperCase()));
+
+    const owners = [];
+    let rostered = null;
+    for (const team of standings.standings) {
+      for (const p of team.players) {
+        if (p.player_id === playerId) {
+          owners.push({ teamId: team.id, teamName: team.name, owner: team.owner });
+          if (!rostered) rostered = p;
+        }
+      }
+    }
+
+    let player, stats, points, breakdown, partial = false;
+    if (rostered) {
+      player = {
+        playerId, name: rostered.player_name, position: rostered.position,
+        position_detail: rostered.position_detail, nhl_team: rostered.nhl_team,
+        headshot_url: rostered.headshot_url, crest_url: rostered.crest_url,
+      };
+      stats = rostered.stats; points = rostered.points; breakdown = rostered.breakdown;
+    } else {
+      try {
+        const data = await cachedNhlFetch(`player-${playerId}`, `${NHL_BASE}/player/${playerId}/landing`);
+        const pos = mapPosition(data.position);
+        stats = pos === 'G' ? normalizeGoalie(getPlayoffStats(data, season), playerId) : normalizeSkater(getPlayoffStats(data, season), playerId);
+        const scored = scorePlayerStandalone(pos, stats, cfg);
+        points = scored.points; breakdown = scored.breakdown; partial = scored.partial;
+        player = {
+          playerId,
+          name: `${data.firstName?.default || ''} ${data.lastName?.default || ''}`.trim(),
+          position: pos, position_detail: data.position || '',
+          nhl_team: data.currentTeamAbbrev || '',
+          headshot_url: normalizeHeadshotUrl(data.headshot),
+          crest_url: teamCrestUrl(data.currentTeamAbbrev),
+        };
+      } catch {
+        return json({ error: 'Could not load player' }, { status: 502 });
+      }
+    }
+
+    const eliminated = elimSet.has((player.nhl_team || '').trim().toUpperCase());
+    return json({
+      player, stats, points, breakdown, partial,
+      owners, ownerCount: owners.length,
+      ownershipPct: totalTeams ? Math.round((owners.length / totalTeams) * 100) : 0,
+      totalTeams, eliminated, season,
+    });
+  }
 
   if (pathname === '/api/teams' && request.method === 'GET') {
     return json(await getTeams(db));
@@ -509,10 +1356,27 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/standings' && request.method === 'GET') {
-    const season = getCurrentSeason();
+    // Legacy single-pool standings (all teams, default scoring).
+    return json(await computeStandings(db, { leagueId: null, season: getCurrentSeason(), config: DEFAULT_LEAGUE_CONFIG }));
+  }
+
+  return json({ error: 'Not found' }, { status: 404 });
+}
+
+// Compute standings for one league (or the legacy global pool when leagueId is
+// null). Fetches NHL data, scores per the league's config, writes snapshots, and
+// falls back to the last good result for that league on NHL API failure.
+async function computeStandings(db, { leagueId, season, config }) {
+  const cfg = config || DEFAULT_LEAGUE_CONFIG;
+  const cacheKey = leagueId == null ? '__global__' : String(leagueId);
+  let confirmedActiveGoalies = confirmedActiveGoaliesByLeague.get(cacheKey);
+  if (!confirmedActiveGoalies) {
+    confirmedActiveGoalies = new Map();
+    confirmedActiveGoaliesByLeague.set(cacheKey, confirmedActiveGoalies);
+  }
 
     try {
-      const teams = await getTeams(db);
+      const teams = leagueId == null ? await getTeams(db) : await getLeagueTeams(db, leagueId);
       const teamsWithPlayers = await Promise.all(
         teams.map(async (team) => ({ ...team, players: await getTeamPlayers(db, team.id) }))
       );
@@ -643,24 +1507,24 @@ async function handleApi(request, env, pathname) {
           if (p.position === 'G') {
             stats = goalieMap[p.player_id] ?? null;
             if (stats) {
-              const winsPoints = (stats.wins ?? 0) * 2;
-              const shutoutPoints = (stats.shutouts ?? 0) * 3;
-              const gaaRank = gaaRankMap[p.player_id] ?? 0;
-              const svpRank = svpRankMap[p.player_id] ?? 0;
+              const winsPoints = (stats.wins ?? 0) * cfg.scoring.goalie.win;
+              const shutoutPoints = (stats.shutouts ?? 0) * cfg.scoring.goalie.shutout;
+              const gaaRank = cfg.scoring.goalie.gaaRank ? (gaaRankMap[p.player_id] ?? 0) : 0;
+              const svpRank = cfg.scoring.goalie.svpRank ? (svpRankMap[p.player_id] ?? 0) : 0;
               points = winsPoints + shutoutPoints + gaaRank + svpRank;
               breakdown = { winsPoints, shutoutPoints, gaaRank, svpRank };
             }
           } else {
             stats = skaterMap[p.player_id] ?? null;
             if (stats) {
-              const goalPoints = (stats.goals ?? 0) * 2;
-              const assistPoints = stats.assists ?? 0;
+              const goalPoints = (stats.goals ?? 0) * cfg.scoring.skater.goal;
+              const assistPoints = (stats.assists ?? 0) * cfg.scoring.skater.assist;
               const stPoints =
-                (stats.ppGoals ?? 0) +
+                ((stats.ppGoals ?? 0) +
                 (stats.ppAssists ?? 0) +
                 (stats.shGoals ?? 0) +
-                (stats.shAssists ?? 0);
-              const pimPoints = (stats.penaltyMinutes ?? 0) * 0.5;
+                (stats.shAssists ?? 0)) * cfg.scoring.skater.specialTeamsPointBonus;
+              const pimPoints = (stats.penaltyMinutes ?? 0) * cfg.scoring.skater.pim;
               const pmPoints = stats.plusMinus ?? 0;
               points = goalPoints + assistPoints + stPoints + pimPoints + pmPoints;
               breakdown = { goalPoints, assistPoints, stPoints, pimPoints, pmPoints };
@@ -705,13 +1569,14 @@ async function handleApi(request, env, pathname) {
       const fetchedCount = staleOrMissingIds.length;
       const withPlayoffData = Object.values(playerDataMap).filter(Boolean).length;
       const result = { standings, season, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData, snapshotWriteErrors, teamSnapshotErrors } };
-      lastSuccessfulStandings = result;
-      return json(result);
+      lastSuccessfulStandingsByLeague.set(cacheKey, result);
+      return result;
     } catch (e) {
-      if (lastSuccessfulStandings) {
-        return json({ ...lastSuccessfulStandings, stale: true, error: e.message });
+      const last = lastSuccessfulStandingsByLeague.get(cacheKey);
+      if (last) {
+        return { ...last, stale: true, error: e.message };
       }
-      const teams = await getTeams(db);
+      const teams = leagueId == null ? await getTeams(db) : await getLeagueTeams(db, leagueId);
       const standings = await Promise.all(
         teams.map(async (t) => ({
           ...t,
@@ -726,17 +1591,14 @@ async function handleApi(request, env, pathname) {
         }))
       );
 
-      return json({
+      return {
         standings,
         season,
         poolGoalieCount: 0,
         lastUpdated: new Date().toISOString(),
         error: e.message
-      });
+      };
     }
-  }
-
-  return json({ error: 'Not found' }, { status: 404 });
 }
 
 export default {
@@ -752,6 +1614,22 @@ export default {
 
   async scheduled(_event, env, _ctx) {
     clearNhlCache();
-    await handleApi(new Request('https://cron.local/api/standings'), env, '/api/standings');
+    const db = env.DB;
+    try {
+      const { results } = await db.prepare('SELECT id, season, config_json FROM leagues').all();
+      for (const league of (results || [])) {
+        try {
+          await computeStandings(db, { leagueId: league.id, season: league.season, config: mergeConfig(league.config_json) });
+        } catch (err) {
+          console.error(`[cron] league ${league.id} standings failed:`, err?.message ?? err);
+        }
+      }
+    } catch (err) {
+      console.error('[cron] failed to list leagues:', err?.message ?? err);
+    }
+    // Also recompute the legacy global pool (covers any not-yet-migrated teams).
+    try {
+      await computeStandings(db, { leagueId: null, season: getCurrentSeason(), config: DEFAULT_LEAGUE_CONFIG });
+    } catch {}
   }
 };
