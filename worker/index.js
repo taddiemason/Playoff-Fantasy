@@ -833,6 +833,65 @@ async function handleApi(request, env, pathname) {
     return json(publicLeague(league, { role: ctx.role, isOwner: league.owner_user_id === ctx.user.id }));
   }
 
+  // ── Schedule ──────────────────────────────────────────────────────────────
+  const scheduleMatch = pathname.match(/^\/api\/leagues\/(\d+)\/schedule$/);
+  if (scheduleMatch && request.method === 'GET') {
+    const leagueId = parseId(scheduleMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const { results: periods } = await db
+      .prepare('SELECT * FROM matchup_periods WHERE league_id = ? ORDER BY period_num')
+      .bind(leagueId).all();
+    const { results: matchups } = await db
+      .prepare(`SELECT m.*, t1.name AS home_name, t2.name AS away_name
+                FROM matchups m
+                JOIN teams t1 ON t1.id = m.home_team_id
+                JOIN teams t2 ON t2.id = m.away_team_id
+                WHERE m.league_id = ? ORDER BY m.period_id, m.id`)
+      .bind(leagueId).all();
+    return json({ periods: periods || [], matchups: matchups || [] });
+  }
+
+  const scheduleGenMatch = pathname.match(/^\/api\/leagues\/(\d+)\/schedule\/generate$/);
+  if (scheduleGenMatch && request.method === 'POST') {
+    const leagueId = parseId(scheduleGenMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const { start_date, num_weeks } = await request.json();
+    if (!start_date || !num_weeks || num_weeks < 1 || num_weeks > 52) {
+      return json({ error: 'start_date and num_weeks (1–52) are required' }, { status: 400 });
+    }
+    const teams = await getLeagueTeams(db, leagueId);
+    if (teams.length < 2) return json({ error: 'League needs at least 2 teams' }, { status: 400 });
+
+    const cfg = mergeConfig(ctx.league.config_json);
+    const periods = generateRoundRobin(teams, start_date, num_weeks, cfg.lineup_lock_hour_utc);
+
+    // Wipe existing schedule then insert fresh
+    await db.prepare('DELETE FROM matchup_periods WHERE league_id = ?').bind(leagueId).run();
+
+    for (const p of periods) {
+      const period = await db
+        .prepare(`INSERT INTO matchup_periods (league_id, period_num, start_date, end_date, lock_time)
+                  VALUES (?, ?, ?, ?, ?) RETURNING *`)
+        .bind(leagueId, p.period_num, p.start_date, p.end_date, p.lock_time)
+        .first();
+      for (const m of p.matchups) {
+        await db
+          .prepare(`INSERT INTO matchups (league_id, period_id, home_team_id, away_team_id)
+                    VALUES (?, ?, ?, ?)`)
+          .bind(leagueId, period.id, m.home_team_id, m.away_team_id)
+          .run();
+      }
+    }
+
+    const { results: allPeriods } = await db
+      .prepare('SELECT * FROM matchup_periods WHERE league_id = ? ORDER BY period_num')
+      .bind(leagueId).all();
+    return json({ periods: allPeriods || [] });
+  }
+
   // League-scoped teams
   const lgTeamsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams$/);
   if (lgTeamsMatch && request.method === 'GET') {
