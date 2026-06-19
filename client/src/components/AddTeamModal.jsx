@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api.js'
+import { useAuth } from '../auth/AuthContext.jsx'
 
 function validateTiebreaker(val) {
   if (!val.trim()) return null
@@ -10,8 +11,9 @@ function validateTiebreaker(val) {
 }
 
 export default function AddTeamModal({ leagueId, onClose, onCreated }) {
+  const { user } = useAuth()
   const [name, setName] = useState('')
-  const [owner, setOwner] = useState('')
+  const [owner, setOwner] = useState(user?.username || '')
   const [tiebreaker, setTiebreaker] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
