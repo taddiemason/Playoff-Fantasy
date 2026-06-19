@@ -98,7 +98,7 @@ export const api = {
   // Leagues (multi-tenant)
   leagues: {
     mine: () => request('/api/me/leagues'),
-    create: (name) => request('/api/leagues', { method: 'POST', body: JSON.stringify({ name }) }),
+    create: (name, seasonType = 'playoffs') => request('/api/leagues', { method: 'POST', body: JSON.stringify({ name, season_type: seasonType }) }),
     get: (id) => request(`/api/leagues/${id}`),
     update: (id, data) => request(`/api/leagues/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 

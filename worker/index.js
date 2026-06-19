@@ -56,9 +56,9 @@ function normalizeHeadshotUrl(url) {
 }
 
 
-function getPlayoffStats(data, season) {
+function getSeasonStats(data, season, gameTypeId) {
   return (data.seasonTotals || []).find(
-    s => s.leagueAbbrev === 'NHL' && s.gameTypeId === 3 && String(s.season) === String(season)
+    s => s.leagueAbbrev === 'NHL' && s.gameTypeId === gameTypeId && String(s.season) === String(season)
   ) || null;
 }
 
@@ -324,6 +324,7 @@ function publicLeague(league, extra = {}) {
     name: league.name,
     owner_user_id: league.owner_user_id,
     season: league.season,
+    season_type: league.season_type || 'playoffs',
     is_locked: !!league.is_locked,
     invite_code: league.invite_code,
     config: mergeConfig(league.config_json),
@@ -389,16 +390,16 @@ async function getTeamPlayers(db, teamId) {
   }));
 }
 
-async function getPlayerSnapshotMap(db, season, playerIds) {
+async function getPlayerSnapshotMap(db, season, gameType, playerIds) {
   if (!playerIds.length) return {};
   const placeholders = playerIds.map(() => '?').join(',');
   const { results } = await db
     .prepare(
       `SELECT player_id, stats_json, fetched_at
        FROM player_stats_snapshots
-       WHERE season = ? AND player_id IN (${placeholders})`
+       WHERE season = ? AND game_type = ? AND player_id IN (${placeholders})`
     )
-    .bind(season, ...playerIds)
+    .bind(season, gameType, ...playerIds)
     .all();
 
   return Object.fromEntries(
@@ -688,14 +689,15 @@ async function handleApi(request, env, pathname) {
   if (pathname === '/api/leagues' && request.method === 'POST') {
     const user = await getSessionUser(db, request);
     if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
-    const { name } = await request.json();
+    const { name, season_type } = await request.json();
     if (!name?.trim()) return json({ error: 'League name required' }, { status: 400 });
+    const seasonType = (season_type === 'regular') ? 'regular' : 'playoffs';
     const league = await db
       .prepare(
-        `INSERT INTO leagues (name, owner_user_id, season, config_json, invite_code)
-         VALUES (?, ?, ?, ?, ?) RETURNING *`
+        `INSERT INTO leagues (name, owner_user_id, season, season_type, config_json, invite_code)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING *`
       )
-      .bind(name.trim(), user.id, getCurrentSeason(), JSON.stringify(DEFAULT_LEAGUE_CONFIG), generateInviteCode())
+      .bind(name.trim(), user.id, getCurrentSeason(), seasonType, JSON.stringify(DEFAULT_LEAGUE_CONFIG), generateInviteCode())
       .first();
     await db.prepare('INSERT INTO league_members (league_id, user_id, role) VALUES (?, ?, ?)')
       .bind(league.id, user.id, 'commissioner').run();
@@ -872,7 +874,7 @@ async function handleApi(request, env, pathname) {
     const leagueId = parseId(lgStandingsMatch[1]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
-    const result = await computeStandings(db, { leagueId, season: ctx.league.season, config: mergeConfig(ctx.league.config_json) });
+    const result = await computeStandings(db, { leagueId, season: ctx.league.season, seasonType: ctx.league.season_type || 'playoffs', config: mergeConfig(ctx.league.config_json) });
     return json(result);
   }
 
@@ -1023,7 +1025,7 @@ async function handleApi(request, env, pathname) {
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
     const cfg = mergeConfig(ctx.league.config_json);
-    const standings = await computeStandings(db, { leagueId, season: ctx.league.season, config: cfg });
+    const standings = await computeStandings(db, { leagueId, season: ctx.league.season, seasonType: ctx.league.season_type || 'playoffs', config: cfg });
     const totalTeams = standings.standings.length;
     const elimSet = new Set((standings.eliminatedTeams || []).map((t) => (t || '').trim().toUpperCase()));
     const map = new Map();
@@ -1056,7 +1058,9 @@ async function handleApi(request, env, pathname) {
     if (ctx.error) return ctx.error;
     const cfg = mergeConfig(ctx.league.config_json);
     const season = ctx.league.season;
-    const standings = await computeStandings(db, { leagueId, season, config: cfg });
+    const seasonType = ctx.league.season_type || 'playoffs';
+    const gameTypeId = seasonType === 'regular' ? 2 : 3;
+    const standings = await computeStandings(db, { leagueId, season, seasonType, config: cfg });
     const totalTeams = standings.standings.length;
     const elimSet = new Set((standings.eliminatedTeams || []).map((t) => (t || '').trim().toUpperCase()));
 
@@ -1083,7 +1087,7 @@ async function handleApi(request, env, pathname) {
       try {
         const data = await cachedNhlFetch(`player-${playerId}`, `${NHL_BASE}/player/${playerId}/landing`);
         const pos = mapPosition(data.position);
-        stats = pos === 'G' ? normalizeGoalie(getPlayoffStats(data, season), playerId) : normalizeSkater(getPlayoffStats(data, season), playerId);
+        stats = pos === 'G' ? normalizeGoalie(getSeasonStats(data, season, gameTypeId), playerId) : normalizeSkater(getSeasonStats(data, season, gameTypeId), playerId);
         const scored = scorePlayerStandalone(pos, stats, cfg);
         points = scored.points; breakdown = scored.breakdown; partial = scored.partial;
         player = {
@@ -1348,7 +1352,7 @@ async function handleApi(request, env, pathname) {
         headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
       });
       const body = await data.json();
-      const playoffEntry = getPlayoffStats(body, season);
+      const playoffEntry = getSeasonStats(body, season, 3);
       return json({ status: data.status, season, playoffEntry, seasonTotalsCount: (body.seasonTotals || []).length });
     } catch (e) {
       return json({ error: e.message, season });
@@ -1366,8 +1370,9 @@ async function handleApi(request, env, pathname) {
 // Compute standings for one league (or the legacy global pool when leagueId is
 // null). Fetches NHL data, scores per the league's config, writes snapshots, and
 // falls back to the last good result for that league on NHL API failure.
-async function computeStandings(db, { leagueId, season, config }) {
+async function computeStandings(db, { leagueId, season, seasonType = 'playoffs', config }) {
   const cfg = config || DEFAULT_LEAGUE_CONFIG;
+  const gameTypeId = seasonType === 'regular' ? 2 : 3;
   const cacheKey = leagueId == null ? '__global__' : String(leagueId);
   let confirmedActiveGoalies = confirmedActiveGoaliesByLeague.get(cacheKey);
   if (!confirmedActiveGoalies) {
@@ -1385,7 +1390,7 @@ async function computeStandings(db, { leagueId, season, config }) {
       const allPlayerIds = [...new Set(
         teamsWithPlayers.flatMap(t => t.players.map(p => p.player_id))
       )];
-      const snapshotMap = await getPlayerSnapshotMap(db, season, allPlayerIds);
+      const snapshotMap = await getPlayerSnapshotMap(db, season, gameTypeId, allPlayerIds);
       const playersMissingHeadshots = new Set(
         teamsWithPlayers
           .flatMap((t) => t.players)
@@ -1401,7 +1406,7 @@ async function computeStandings(db, { leagueId, season, config }) {
         staleOrMissingIds.map(async id => {
           try {
             const data = await cachedNhlFetch(`player-${id}`, `${NHL_BASE}/player/${id}/landing`);
-            const playoffStats = getPlayoffStats(data, season);
+            const seasonStats = getSeasonStats(data, season, gameTypeId);
             const headshot = normalizeHeadshotUrl(data?.headshot);
             if (headshot) {
               await db.prepare('UPDATE team_players SET headshot_url = ? WHERE player_id = ?')
@@ -1410,15 +1415,15 @@ async function computeStandings(db, { leagueId, season, config }) {
             }
             await db
               .prepare(
-                `INSERT INTO player_stats_snapshots (player_id, season, stats_json, fetched_at)
-                 VALUES (?, ?, ?, ?)
-                 ON CONFLICT(player_id, season) DO UPDATE SET
+                `INSERT INTO player_stats_snapshots (player_id, season, game_type, stats_json, fetched_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(player_id, season, game_type) DO UPDATE SET
                    stats_json = excluded.stats_json,
                    fetched_at = excluded.fetched_at`
               )
-              .bind(id, season, JSON.stringify(playoffStats), now)
+              .bind(id, season, gameTypeId, JSON.stringify(seasonStats), now)
               .run();
-            return [id, { stats: playoffStats, headshot }];
+            return [id, { stats: seasonStats, headshot }];
           } catch (err) {
             console.error(`[snapshot] failed to write player ${id}:`, err?.message ?? err);
             snapshotWriteErrors++;
@@ -1455,11 +1460,11 @@ async function computeStandings(db, { leagueId, season, config }) {
         }
       }
 
-      // Fetch GAA from dedicated playoff leaders endpoint — seasonTotals omits goalsAgainstAvg
+      // Fetch GAA from dedicated leaders endpoint — seasonTotals omits goalsAgainstAvg
       try {
         const gaaLeaders = await cachedNhlFetch(
-          `goalie-gaa-${season}`,
-          `${NHL_BASE}/goalie-stats-leaders/${season}/3?categories=goalsAgainstAvg&limit=500`
+          `goalie-gaa-${season}-${gameTypeId}`,
+          `${NHL_BASE}/goalie-stats-leaders/${season}/${gameTypeId}?categories=goalsAgainstAvg&limit=500`
         );
         for (const g of (gaaLeaders?.goalsAgainstAvg || [])) {
           if (g.id != null && g.value != null && goalieMap[g.id] && goalieMap[g.id].goalsAgainstAverage == null) {
@@ -1545,7 +1550,7 @@ async function computeStandings(db, { leagueId, season, config }) {
       });
 
       standings.sort((a, b) => b.totalPoints - a.totalPoints);
-      const eliminatedTeams = await getEliminatedTeams(season, db);
+      const eliminatedTeams = seasonType === 'regular' ? [] : await getEliminatedTeams(season, db);
       let teamSnapshotErrors = 0;
       await Promise.all(
         standings.map((team) =>
@@ -1567,8 +1572,8 @@ async function computeStandings(db, { leagueId, season, config }) {
       );
 
       const fetchedCount = staleOrMissingIds.length;
-      const withPlayoffData = Object.values(playerDataMap).filter(Boolean).length;
-      const result = { standings, season, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withPlayoffData, snapshotWriteErrors, teamSnapshotErrors } };
+      const withSeasonData = Object.values(playerDataMap).filter(Boolean).length;
+      const result = { standings, season, seasonType, poolGoalieCount: n, eliminatedTeams, lastUpdated: new Date().toISOString(), _debug: { totalPlayers: allPlayerIds.length, fetchedCount, withSeasonData, snapshotWriteErrors, teamSnapshotErrors } };
       lastSuccessfulStandingsByLeague.set(cacheKey, result);
       return result;
     } catch (e) {
@@ -1616,10 +1621,10 @@ export default {
     clearNhlCache();
     const db = env.DB;
     try {
-      const { results } = await db.prepare('SELECT id, season, config_json FROM leagues').all();
+      const { results } = await db.prepare('SELECT id, season, season_type, config_json FROM leagues').all();
       for (const league of (results || [])) {
         try {
-          await computeStandings(db, { leagueId: league.id, season: league.season, config: mergeConfig(league.config_json) });
+          await computeStandings(db, { leagueId: league.id, season: league.season, seasonType: league.season_type || 'playoffs', config: mergeConfig(league.config_json) });
         } catch (err) {
           console.error(`[cron] league ${league.id} standings failed:`, err?.message ?? err);
         }

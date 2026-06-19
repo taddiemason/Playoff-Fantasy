@@ -57,7 +57,7 @@ export default function LeagueHome() {
         <div>
           <div className="page-title">{league.name}</div>
           <div className="page-subtitle">
-            {seasonStr && `${seasonStr} NHL Playoffs · `}{league.memberCount ?? 0} members
+            {seasonStr && `${seasonStr} ${league.season_type === 'regular' ? 'Regular Season' : 'NHL Playoffs'} · `}{league.memberCount ?? 0} members
             {league.is_locked && <span className="lock-pill"> Locked</span>}
           </div>
         </div>
@@ -131,7 +131,7 @@ export default function LeagueHome() {
                       <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>No players added</span>
                     )}
                   </div>
-                  {totalPlayers > 0 && (
+                  {totalPlayers > 0 && league.season_type !== 'regular' && (
                     <div className={`players-remaining ${activeClass}`}>{activePlayers}/{totalPlayers} active</div>
                   )}
                   {team.tiebreaker && (
@@ -151,6 +151,7 @@ export default function LeagueHome() {
       {showAddTeam && (
         <AddTeamModal
           leagueId={leagueId}
+          seasonType={league.season_type || 'playoffs'}
           onClose={() => setShowAddTeam(false)}
           onCreated={() => { setShowAddTeam(false); fetchStandings() }}
         />

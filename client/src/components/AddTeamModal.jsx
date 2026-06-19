@@ -10,23 +10,26 @@ function validateTiebreaker(val) {
   return null
 }
 
-export default function AddTeamModal({ leagueId, onClose, onCreated }) {
+export default function AddTeamModal({ leagueId, seasonType = 'playoffs', onClose, onCreated }) {
   const { user } = useAuth()
   const [name, setName] = useState('')
   const [owner, setOwner] = useState(user?.username || '')
   const [tiebreaker, setTiebreaker] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const isPlayoffs = seasonType === 'playoffs'
 
   async function handleSubmit(e) {
     e.preventDefault()
     if (!name.trim()) { setError('Team name is required'); return }
-    const tbErr = validateTiebreaker(tiebreaker)
-    if (tbErr) { setError(tbErr); return }
+    if (isPlayoffs) {
+      const tbErr = validateTiebreaker(tiebreaker)
+      if (tbErr) { setError(tbErr); return }
+    }
     setLoading(true)
     setError('')
     try {
-      const team = await api.leagues.createTeam(leagueId, name.trim(), owner.trim(), tiebreaker.trim() || null)
+      const team = await api.leagues.createTeam(leagueId, name.trim(), owner.trim(), isPlayoffs ? (tiebreaker.trim() || null) : null)
       onCreated(team)
     } catch (err) {
       setError(err.message)
@@ -66,20 +69,22 @@ export default function AddTeamModal({ leagueId, onClose, onCreated }) {
                 maxLength={50}
               />
             </div>
-            <div className="form-group">
-              <label className="form-label">Tiebreaker — Stanley Cup Winning Goalie SV%</label>
-              <input
-                className="form-input"
-                placeholder="e.g. .9145"
-                value={tiebreaker}
-                onChange={e => setTiebreaker(e.target.value)}
-                maxLength={6}
-              />
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                Guess the playoff SV% of the Stanley Cup winning goalie to 4 decimal places.
-                Used to break ties in final standings.
+            {isPlayoffs && (
+              <div className="form-group">
+                <label className="form-label">Tiebreaker — Stanley Cup Winning Goalie SV%</label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. .9145"
+                  value={tiebreaker}
+                  onChange={e => setTiebreaker(e.target.value)}
+                  maxLength={6}
+                />
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Guess the playoff SV% of the Stanley Cup winning goalie to 4 decimal places.
+                  Used to break ties in final standings.
+                </div>
               </div>
-            </div>
+            )}
           </div>
           <div className="modal-footer">
             <button type="button" className="btn btn-ghost" onClick={onClose}>Cancel</button>
