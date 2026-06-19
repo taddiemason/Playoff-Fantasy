@@ -553,6 +553,77 @@ async function getCurrentPeriod(db, leagueId) {
   ).bind(leagueId, today, today).first();
 }
 
+async function scoreMatchupsForLeague(db, leagueId, league) {
+  const period = await getCurrentPeriod(db, leagueId);
+  if (!period) return 0;
+
+  const { matchups } = await (async () => {
+    const { results } = await db
+      .prepare('SELECT * FROM matchups WHERE period_id = ?')
+      .bind(period.id).all();
+    return { matchups: results || [] };
+  })();
+
+  if (matchups.length === 0) return 0;
+
+  const standings = await computeStandings(db, {
+    leagueId,
+    season: league.season,
+    seasonType: league.season_type || 'playoffs',
+    config: mergeConfig(league.config_json),
+  });
+
+  // Build a map of team_id → {player_id → points}
+  const teamPlayerPoints = new Map();
+  for (const team of (standings.standings || [])) {
+    const playerPts = new Map();
+    for (const p of (team.players || [])) {
+      playerPts.set(p.player_id, p.points ?? 0);
+    }
+    teamPlayerPoints.set(team.id, playerPts);
+  }
+
+  let scored = 0;
+  for (const matchup of matchups) {
+    const calcScore = async (teamId) => {
+      const { results: arRows } = await db
+        .prepare('SELECT player_id, is_active FROM active_roster WHERE team_id = ? AND period_id = ?')
+        .bind(teamId, period.id).all();
+
+      const playerPts = teamPlayerPoints.get(teamId) || new Map();
+
+      if (!arRows || arRows.length === 0) {
+        // No lineup set — sum all players
+        let total = 0;
+        for (const pts of playerPts.values()) total += pts;
+        return total;
+      }
+
+      let total = 0;
+      for (const row of arRows) {
+        if (row.is_active) total += playerPts.get(row.player_id) ?? 0;
+      }
+      return total;
+    };
+
+    const homeScore = await calcScore(matchup.home_team_id);
+    const awayScore = await calcScore(matchup.away_team_id);
+    const winnerId = homeScore > awayScore
+      ? matchup.home_team_id
+      : awayScore > homeScore
+        ? matchup.away_team_id
+        : null;
+
+    await db.prepare(`
+      UPDATE matchups SET home_score = ?, away_score = ?, winner_team_id = ?
+      WHERE id = ?
+    `).bind(homeScore, awayScore, winnerId, matchup.id).run();
+    scored++;
+  }
+
+  return scored;
+}
+
 async function handleApi(request, env, pathname) {
   const db = env.DB;
 
@@ -991,6 +1062,68 @@ async function handleApi(request, env, pathname) {
     }
 
     return json({ success: true });
+  }
+
+  // ── Matchups ──────────────────────────────────────────────────────────────
+  const matchupCurrentMatch = pathname.match(/^\/api\/leagues\/(\d+)\/matchups\/current$/);
+  if (matchupCurrentMatch && request.method === 'GET') {
+    const leagueId = parseId(matchupCurrentMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const period = await getCurrentPeriod(db, leagueId);
+    if (!period) return json({ period: null, matchup: null });
+
+    const myTeam = await db
+      .prepare('SELECT * FROM teams WHERE league_id = ? AND user_id = ? LIMIT 1')
+      .bind(leagueId, ctx.user.id).first();
+    if (!myTeam) return json({ error: 'You have no team in this league' }, { status: 404 });
+
+    const matchup = await db.prepare(`
+      SELECT m.*, t1.name AS home_name, t2.name AS away_name
+      FROM matchups m
+      JOIN teams t1 ON t1.id = m.home_team_id
+      JOIN teams t2 ON t2.id = m.away_team_id
+      WHERE m.period_id = ? AND (m.home_team_id = ? OR m.away_team_id = ?)
+      LIMIT 1
+    `).bind(period.id, myTeam.id, myTeam.id).first();
+
+    if (!matchup) return json({ period, matchup: null });
+
+    const oppTeamId = matchup.home_team_id === myTeam.id ? matchup.away_team_id : matchup.home_team_id;
+    const oppTeam = await db.prepare('SELECT * FROM teams WHERE id = ?').bind(oppTeamId).first();
+    const oppPlayers = await getTeamPlayers(db, oppTeamId);
+
+    return json({ period, matchup, myTeam, oppTeam, oppPlayers });
+  }
+
+  const matchupPeriodMatch = pathname.match(/^\/api\/leagues\/(\d+)\/matchups\/(\d+)$/);
+  if (matchupPeriodMatch && request.method === 'GET') {
+    const leagueId = parseId(matchupPeriodMatch[1]);
+    const periodId = parseId(matchupPeriodMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const period = await db.prepare('SELECT * FROM matchup_periods WHERE id = ? AND league_id = ?')
+      .bind(periodId, leagueId).first();
+    if (!period) return json({ error: 'Period not found' }, { status: 404 });
+    const { results: matchups } = await db.prepare(`
+      SELECT m.*, t1.name AS home_name, t2.name AS away_name
+      FROM matchups m
+      JOIN teams t1 ON t1.id = m.home_team_id
+      JOIN teams t2 ON t2.id = m.away_team_id
+      WHERE m.period_id = ?
+    `).bind(periodId).all();
+    return json({ period, matchups: matchups || [] });
+  }
+
+  const matchupScoreMatch = pathname.match(/^\/api\/leagues\/(\d+)\/matchups\/score$/);
+  if (matchupScoreMatch && request.method === 'POST') {
+    const leagueId = parseId(matchupScoreMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const scored = await scoreMatchupsForLeague(db, leagueId, ctx.league);
+    return json({ scored });
   }
 
   // League-scoped teams
@@ -1879,6 +2012,11 @@ export default {
           await computeStandings(db, { leagueId: league.id, season: league.season, seasonType: league.season_type || 'playoffs', config: mergeConfig(league.config_json) });
         } catch (err) {
           console.error(`[cron] league ${league.id} standings failed:`, err?.message ?? err);
+        }
+        try {
+          await scoreMatchupsForLeague(db, league.id, league);
+        } catch (err) {
+          console.error(`[cron] league ${league.id} matchup scoring failed:`, err?.message ?? err);
         }
       }
     } catch (err) {
