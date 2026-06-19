@@ -132,6 +132,29 @@ export const api = {
     getInvites: (id) => request(`/api/leagues/${id}/invites`),
     createInvite: (id, opts) => request(`/api/leagues/${id}/invites`, { method: 'POST', body: JSON.stringify(opts || {}) }),
     revokeInvite: (id, inviteId) => request(`/api/leagues/${id}/invites/${inviteId}`, { method: 'DELETE' }),
+
+    // Schedule
+    schedule: {
+      get:      (id) => request(`/api/leagues/${id}/schedule`),
+      generate: (id, startDate, numWeeks) => request(`/api/leagues/${id}/schedule/generate`, {
+        method: 'POST', body: JSON.stringify({ start_date: startDate, num_weeks: numWeeks })
+      }),
+    },
+
+    // Lineup
+    lineup: {
+      get: (id, teamId, periodId) => request(`/api/leagues/${id}/teams/${teamId}/lineup/${periodId}`),
+      set: (id, teamId, periodId, activePlayerIds) => request(`/api/leagues/${id}/teams/${teamId}/lineup/${periodId}`, {
+        method: 'PUT', body: JSON.stringify({ active_player_ids: activePlayerIds })
+      }),
+    },
+
+    // Matchups
+    matchup: {
+      current:  (id) => request(`/api/leagues/${id}/matchups/current`),
+      byPeriod: (id, periodId) => request(`/api/leagues/${id}/matchups/${periodId}`),
+      score:    (id) => request(`/api/leagues/${id}/matchups/score`, { method: 'POST' }),
+    },
   },
 
   // Invite codes (public preview + join)

@@ -14,6 +14,9 @@ import AddPlayers from './pages/AddPlayers.jsx'
 import PlayerExplorer from './pages/PlayerExplorer.jsx'
 import CommissionerDashboard from './pages/CommissionerDashboard.jsx'
 import JoinLeague from './pages/JoinLeague.jsx'
+import SchedulePage from './pages/SchedulePage.jsx'
+import LineupPage from './pages/LineupPage.jsx'
+import MatchupPage from './pages/MatchupPage.jsx'
 import LeagueLayout from './components/LeagueLayout.jsx'
 import RequireAuth from './components/guards/RequireAuth.jsx'
 import { useAuth } from './auth/AuthContext.jsx'
@@ -46,6 +49,9 @@ export default function App() {
             <Route path="add-players" element={<AddPlayers />} />
             <Route path="admin" element={<CommissionerDashboard />} />
             <Route path="teams/:teamId" element={<TeamDetail />} />
+            <Route path="schedule" element={<SchedulePage />} />
+            <Route path="lineup" element={<LineupPage />} />
+            <Route path="matchup" element={<MatchupPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
