@@ -1934,7 +1934,26 @@ async function computeStandings(db, { leagueId, season, seasonType = 'playoffs',
         return { ...team, players, totalPoints: Math.round(totalPoints * 10) / 10 };
       });
 
-      standings.sort((a, b) => b.totalPoints - a.totalPoints);
+      // Attach W/L/T records if the league has a schedule
+      let records = new Map();
+      if (leagueId != null) {
+        try { records = await getTeamRecords(db, leagueId); } catch {}
+      }
+      for (const team of standings) {
+        const r = records.get(team.id) || { wins: 0, losses: 0, ties: 0 };
+        team.wins   = r.wins;
+        team.losses = r.losses;
+        team.ties   = r.ties;
+      }
+
+      // Sort by W/L/T record first, then total points as tiebreaker
+      standings.sort((a, b) => {
+        const aWin = (a.wins ?? 0) - (a.losses ?? 0);
+        const bWin = (b.wins ?? 0) - (b.losses ?? 0);
+        if (bWin !== aWin) return bWin - aWin;
+        return b.totalPoints - a.totalPoints;
+      });
+
       const eliminatedTeams = seasonType === 'regular' ? [] : await getEliminatedTeams(season, db);
       let teamSnapshotErrors = 0;
       await Promise.all(
