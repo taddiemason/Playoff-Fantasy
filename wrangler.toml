@@ -21,3 +21,11 @@ NODE_ENV = "production"
 
 [triggers]
 crons = ["0 * * * *"]
+
+[[durable_objects.bindings]]
+name = "DRAFT_ROOM"
+class_name = "DraftRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["DraftRoom"]
