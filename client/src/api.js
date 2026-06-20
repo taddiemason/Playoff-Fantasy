@@ -179,6 +179,22 @@ export const api = {
       }),
       veto:    (id, tradeId) => request(`/api/leagues/${id}/trades/${tradeId}/veto`, { method: 'PUT' }),
     },
+
+    draft: {
+      getSession: (id) => request(`/api/leagues/${id}/draft/session`),
+      create:     (id) => request(`/api/leagues/${id}/draft/session`, { method: 'POST' }),
+      setOrder:   (id, order) => request(`/api/leagues/${id}/draft/session/order`, {
+        method: 'PUT', body: JSON.stringify({ order }),
+      }),
+      randomize:  (id) => request(`/api/leagues/${id}/draft/session/randomize`, { method: 'POST' }),
+      start:      (id) => request(`/api/leagues/${id}/draft/session/start`, { method: 'POST' }),
+      pause:      (id) => request(`/api/leagues/${id}/draft/session/pause`, { method: 'POST' }),
+      resume:     (id) => request(`/api/leagues/${id}/draft/session/resume`, { method: 'POST' }),
+      connect:    (id) => {
+        const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        return new WebSocket(`${proto}://${window.location.host}/api/leagues/${id}/draft/ws`);
+      },
+    },
   },
 
   // Invite codes (public preview + join)
