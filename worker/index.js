@@ -11,6 +11,7 @@ import {
 
 export { DraftRoom } from './draft-room.js';
 export { AuctionRoom } from './auction-room.js';
+export { ChatRoom } from './chat-room.js';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const STATS_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
@@ -2004,6 +2005,66 @@ async function handleApi(request, env, pathname) {
     }));
 
     return json({ ok: true });
+  }
+
+  // GET /api/leagues/:id/chat/messages — load last 50 messages (HTTP, for initial load)
+  const chatMsgsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/chat\/messages$/);
+  if (chatMsgsMatch && request.method === 'GET') {
+    const leagueId = parseId(chatMsgsMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const limit = Math.min(parseInt(new URL(request.url).searchParams.get('limit') || '50'), 50);
+    const { results: msgs } = await db.prepare(
+      `SELECT * FROM chat_messages WHERE league_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?`
+    ).bind(leagueId, limit).all();
+    if (!msgs || !msgs.length) return json([]);
+    const ids = msgs.map(m => m.id);
+    const ph = ids.map(() => '?').join(',');
+    const { results: reactions } = await db.prepare(
+      `SELECT message_id, emoji, user_id FROM chat_reactions WHERE message_id IN (${ph})`
+    ).bind(...ids).all();
+    const reactionsByMsg = {};
+    for (const r of (reactions || [])) {
+      if (!reactionsByMsg[r.message_id]) reactionsByMsg[r.message_id] = {};
+      if (!reactionsByMsg[r.message_id][r.emoji]) reactionsByMsg[r.message_id][r.emoji] = [];
+      reactionsByMsg[r.message_id][r.emoji].push(r.user_id);
+    }
+    return json(msgs.reverse().map(m => ({
+      id: m.id,
+      userId: m.user_id,
+      username: m.username,
+      body: m.body,
+      pinned: !!m.pinned,
+      pinnedAt: m.pinned_at || null,
+      createdAt: m.created_at,
+      reactions: Object.entries(reactionsByMsg[m.id] || {}).map(([emoji, userIds]) => ({
+        emoji, count: userIds.length, reactorIds: userIds,
+      })),
+    })));
+  }
+
+  // GET /api/leagues/:id/chat/ws — WebSocket upgrade to ChatRoom DO
+  const chatWsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/chat\/ws$/);
+  if (chatWsMatch && request.method === 'GET') {
+    const leagueId = parseId(chatWsMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const doId = env.CHAT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.CHAT_ROOM.get(doId);
+
+    const proxiedReq = new Request(request.url, {
+      method: request.method,
+      headers: new Headers({
+        ...Object.fromEntries(request.headers),
+        'X-League-Id': String(leagueId),
+        'X-User-Id': String(ctx.user.id),
+        'X-Username': ctx.user.username || 'Unknown',
+        'X-Is-Commissioner': String(isCommissioner(ctx.league, ctx.role, ctx.user.id)),
+      }),
+    });
+
+    return stub.fetch(proxiedReq);
   }
 
   // GET /api/leagues/:id/auction/ws — WebSocket proxy
