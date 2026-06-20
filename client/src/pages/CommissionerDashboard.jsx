@@ -42,6 +42,11 @@ export default function CommissionerDashboard() {
   const [vetoMsg, setVetoMsg] = useState('')
   const [priorityMsg, setPriorityMsg] = useState('')
 
+  // Draft setup
+  const [draftSession, setDraftSession] = useState(null)
+  const [draftMsg, setDraftMsg] = useState('')
+  const [pickTimer, setPickTimer] = useState(() => league.config?.pick_timer_seconds ?? 90)
+
   const loadMembers = useCallback(() => {
     api.leagues.getMembers(leagueId).then(setMembers).catch((e) => setError(e.message))
   }, [leagueId])
@@ -55,6 +60,10 @@ export default function CommissionerDashboard() {
     api.leagues.trades.list(leagueId).then(d => {
       setPendingTrades((d.trades || []).filter(t => t.status === 'accepted'))
     }).catch(() => {})
+  }, [leagueId])
+
+  useEffect(() => {
+    api.leagues.draft.getSession(leagueId).then(d => setDraftSession(d.session)).catch(() => {})
   }, [leagueId])
 
   if (!isCommissioner) {
@@ -168,6 +177,22 @@ export default function CommissionerDashboard() {
       await api.leagues.waivers.resetPriorities(leagueId)
       setPriorityMsg('Waiver priorities reset to 0 for all teams.')
     } catch (e) { setPriorityMsg(e.message) }
+  }
+
+  async function createDraftSession() {
+    try {
+      await api.leagues.draft.create(leagueId)
+      setDraftMsg('Draft session created. Go to the Draft page to set order and start.')
+      const d = await api.leagues.draft.getSession(leagueId)
+      setDraftSession(d.session)
+    } catch (e) { setDraftMsg(e.message) }
+  }
+
+  async function savePickTimer() {
+    try {
+      await api.leagues.update(leagueId, { pick_timer_seconds: Number(pickTimer) })
+      setDraftMsg('Pick timer saved.')
+    } catch (e) { setDraftMsg(e.message) }
   }
 
   return (
@@ -353,6 +378,35 @@ export default function CommissionerDashboard() {
         <p className="st-dim">Resets all team waiver priorities to 0 (equal standing).</p>
         <button onClick={resetPriorities}>Reset Waiver Priorities</button>
       </section>
+
+      {/* ── Draft Setup ── */}
+      <div style={{ marginTop: '2rem', borderTop: '1px solid #333', paddingTop: '1rem' }}>
+        <h3>Draft Setup</h3>
+        {draftMsg && <p className="alert">{draftMsg}</p>}
+
+        <div style={{ marginBottom: '1rem' }}>
+          <label>Pick Timer (seconds)
+            <input
+              type="number"
+              min={15}
+              max={300}
+              value={pickTimer}
+              onChange={e => setPickTimer(e.target.value)}
+              style={{ marginLeft: '0.5rem', width: 70 }}
+            />
+          </label>
+          <button onClick={savePickTimer} style={{ marginLeft: '0.5rem' }}>Save Timer</button>
+        </div>
+
+        {!draftSession ? (
+          <button onClick={createDraftSession}>Create Draft Session</button>
+        ) : (
+          <p className="st-dim">
+            Draft session exists (status: <strong>{draftSession.status}</strong>).{' '}
+            <a href={`/leagues/${leagueId}/draft`}>Go to Draft Room →</a>
+          </p>
+        )}
+      </div>
 
       {/* ── Members ── */}
       <div className="card settings-card">
