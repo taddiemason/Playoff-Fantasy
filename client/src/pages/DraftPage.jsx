@@ -160,7 +160,7 @@ function DraftBoardGrid({ draftOrder, picks, currentPick, totalPicks, currentTea
                 {draftOrder.map((t, si) => {
                   const tid = teamAtSlot(round, si);
                   const pick = pickMap[`${round}-${tid}`];
-                  const isCurrentSlot = !pick && (ri * numTeams + si) === currentPick;
+                  const isCurrentSlot = !pick && teamAtSlot(round, si) === currentTeamId;
                   return (
                     <td key={t.teamId} style={{
                       padding: '4px 6px', border: '1px solid #333', maxWidth: 100,
@@ -310,7 +310,7 @@ export default function DraftPage() {
           api.leagues.draft.getSession(leagueId),
           api.leagues.getTeams(leagueId),
         ]);
-        setInitialData(sessionData);
+        setInitialData({ ...sessionData, teams: teamsData || [] });
         // Check commissioner status via teams list (user_id match against league ownership)
         // Actually check via the league object — use getSession ctx or leagueInfo
         // Simple approach: check if the user owns the league
@@ -321,6 +321,13 @@ export default function DraftPage() {
     }
     load();
   }, [leagueId, user]);
+
+  const [myTeamId2, setMyTeamId2] = useState(null);
+  useEffect(() => {
+    if (!initialData) return;
+    const mine = (initialData.teams || []).find(t => t.user_id === user?.id);
+    if (mine) setMyTeamId2(mine.id);
+  }, [initialData, user]);
 
   if (loading) return <div className="page-content"><p>Loading draft…</p></div>;
 
@@ -361,16 +368,6 @@ export default function DraftPage() {
     })),
     available: [],
   };
-
-  const myTeamId = /* derive from user */ null; // assigned below
-  // We need myTeamId — load it from initialData teams
-  const [myTeamId2, setMyTeamId2] = useState(null);
-  useEffect(() => {
-    api.leagues.getTeams(leagueId).then(teams => {
-      const mine = (teams || []).find(t => t.user_id === user?.id);
-      if (mine) setMyTeamId2(mine.id);
-    }).catch(() => {});
-  }, [leagueId, user]);
 
   const onClockTeam = liveState.draftOrder.find(t => t.teamId === liveState.currentTeamId);
 

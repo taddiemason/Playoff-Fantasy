@@ -225,14 +225,17 @@ export class DraftRoom {
     if (!playerId || !playerName) return this.send(ws, { type: 'error', message: 'playerId and playerName required' });
     if (this.pickedPlayerIds.has(playerId)) return this.send(ws, { type: 'error', message: 'Player already drafted' });
 
-    const pos = playerMeta.position || 'F';
+    // Resolve position from server-side rankings to prevent cap bypass via forged playerMeta
+    const ranked = this.globalRankings.find(r => r.playerId === playerId);
+    const pos = ranked?.position || playerMeta.position || 'F';
     const roster = this.teamRosters.get(currentTeamId) || { F: 0, D: 0, G: 0 };
     const cap = pos === 'G' ? this.capsG : pos === 'D' ? this.capsD : this.capsF;
     if ((roster[pos] || 0) >= cap) {
       return this.send(ws, { type: 'error', message: `Roster full for position ${pos}` });
     }
 
-    await this.executePick(currentTeamId, { playerId, playerName, playerMeta }, false);
+    const trustedMeta = { ...playerMeta, position: pos };
+    await this.executePick(currentTeamId, { playerId, playerName, playerMeta: trustedMeta }, false);
   }
 
   async executePick(teamId, { playerId, playerName, playerMeta = {} }, isAutoPick) {
