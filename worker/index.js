@@ -1161,6 +1161,161 @@ async function handleApi(request, env, pathname) {
     return json({ scored });
   }
 
+  // ── Season lifecycle ────────────────────────────────────────────────────────
+
+  // POST /api/leagues/:id/season/end
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/end$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+    if (ctx.league.phase !== 'active')
+      return json({ error: `Cannot end season in phase: ${ctx.league.phase}` }, { status: 400 });
+
+    const { results: allPlayers } = await db.prepare(
+      `SELECT tp.team_id, tp.player_id, tp.player_name, tp.position, tp.nhl_team,
+              tp.headshot_url, tp.crest_url
+       FROM team_players tp
+       JOIN teams t ON t.id = tp.team_id
+       WHERE t.league_id = ?`
+    ).bind(leagueId).all();
+
+    const now = new Date().toISOString();
+    if (allPlayers && allPlayers.length > 0) {
+      const snapshots = allPlayers.map(p =>
+        db.prepare(
+          `INSERT OR IGNORE INTO roster_snapshots
+             (league_id, team_id, player_id, player_name, player_meta_json, season, was_keeper, snapshotted_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?)`
+        ).bind(leagueId, p.team_id, p.player_id, p.player_name,
+               JSON.stringify({ position: p.position || '', nhl_team: p.nhl_team || '',
+                                headshot_url: p.headshot_url || '', crest_url: p.crest_url || '' }),
+               ctx.league.season, now)
+      );
+      for (let i = 0; i < snapshots.length; i += 100) {
+        await db.batch(snapshots.slice(i, i + 100));
+      }
+    }
+
+    await db.prepare("UPDATE leagues SET phase = 'offseason' WHERE id = ?").bind(leagueId).run();
+    return json({ ok: true });
+  }
+
+  // POST /api/leagues/:id/season/keeper-window/open
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/keeper-window\/open$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+    if (ctx.league.league_format !== 'keeper')
+      return json({ error: 'Only keeper-format leagues have a keeper window' }, { status: 400 });
+    if (ctx.league.phase !== 'offseason')
+      return json({ error: `Cannot open keeper window in phase: ${ctx.league.phase}` }, { status: 400 });
+    await db.prepare("UPDATE leagues SET phase = 'keeper_window' WHERE id = ?").bind(leagueId).run();
+    return json({ ok: true });
+  }
+
+  // POST /api/leagues/:id/season/keeper-window/close
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/keeper-window\/close$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+    if (ctx.league.phase !== 'keeper_window')
+      return json({ error: `Cannot close keeper window in phase: ${ctx.league.phase}` }, { status: 400 });
+
+    const currentSeason = ctx.league.season;
+    // Mark designated keepers in roster_snapshots
+    const { results: kd } = await db.prepare(
+      'SELECT team_id, player_id, cost_type, cost_value FROM keeper_designations WHERE league_id = ? AND season = ?'
+    ).bind(leagueId, currentSeason).all();
+
+    if (kd && kd.length > 0) {
+      const updateSnaps = kd.map(k =>
+        db.prepare(
+          `UPDATE roster_snapshots SET was_keeper = 1, keeper_cost_type = ?, keeper_cost_value = ?
+           WHERE league_id = ? AND team_id = ? AND player_id = ? AND season = ?`
+        ).bind(k.cost_type, k.cost_value, leagueId, k.team_id, k.player_id, currentSeason)
+      );
+      for (let i = 0; i < updateSnaps.length; i += 100) {
+        await db.batch(updateSnaps.slice(i, i + 100));
+      }
+    }
+
+    // Delete non-keeper players from team_players
+    const keeperSet = new Set((kd || []).map(k => `${k.team_id}-${k.player_id}`));
+    const { results: allTp } = await db.prepare(
+      `SELECT tp.id, tp.team_id, tp.player_id FROM team_players tp
+       JOIN teams t ON t.id = tp.team_id WHERE t.league_id = ?`
+    ).bind(leagueId).all();
+    const toDelete = (allTp || []).filter(p => !keeperSet.has(`${p.team_id}-${p.player_id}`));
+    if (toDelete.length > 0) {
+      const delStmts = toDelete.map(p => db.prepare('DELETE FROM team_players WHERE id = ?').bind(p.id));
+      for (let i = 0; i < delStmts.length; i += 100) {
+        await db.batch(delStmts.slice(i, i + 100));
+      }
+    }
+
+    const ns = nextSeason(currentSeason);
+    await db.prepare("UPDATE leagues SET phase = 'pre_draft', season = ? WHERE id = ?").bind(ns, leagueId).run();
+    return json({ ok: true, nextSeason: ns });
+  }
+
+  // POST /api/leagues/:id/season/start
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/start$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+    if (ctx.league.league_format === 'keeper')
+      return json({ error: 'Keeper leagues use the keeper window flow' }, { status: 400 });
+    if (ctx.league.phase !== 'offseason')
+      return json({ error: `Cannot start new season in phase: ${ctx.league.phase}` }, { status: 400 });
+    const ns = nextSeason(ctx.league.season);
+    const newPhase = ctx.league.league_format === 'dynasty' ? 'supplemental_draft' : 'pre_draft';
+    await db.prepare('UPDATE leagues SET phase = ?, season = ? WHERE id = ?').bind(newPhase, ns, leagueId).run();
+    return json({ ok: true, nextSeason: ns, phase: newPhase });
+  }
+
+  // POST /api/leagues/:id/season/activate
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/activate$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+    if (ctx.league.phase !== 'pre_draft')
+      return json({ error: `Cannot activate season in phase: ${ctx.league.phase}` }, { status: 400 });
+
+    if (ctx.league.league_format === 'dynasty') {
+      const config = mergeConfig(ctx.league.config_json);
+      const maxRoster = config.roster.maxF + config.roster.maxD + config.roster.maxG;
+      const { results: overLimit } = await db.prepare(
+        `SELECT t.id, t.name,
+                COUNT(CASE WHEN tp.is_taxi_squad = 0 THEN 1 END) AS main_count,
+                COUNT(CASE WHEN tp.is_taxi_squad = 1 THEN 1 END) AS taxi_count
+         FROM teams t
+         LEFT JOIN team_players tp ON tp.team_id = t.id
+         WHERE t.league_id = ?
+         GROUP BY t.id
+         HAVING main_count > ? OR taxi_count > ?`
+      ).bind(leagueId, maxRoster, config.taxi_squad_size).all();
+      if (overLimit && overLimit.length > 0) {
+        return json({
+          error: 'Cannot activate: some teams are over their roster or taxi squad limit',
+          teams: overLimit,
+        }, { status: 400 });
+      }
+    }
+
+    await db.prepare("UPDATE leagues SET phase = 'active' WHERE id = ?").bind(leagueId).run();
+    return json({ ok: true });
+  }
+
   // ── Draft ────────────────────────────────────────────────────────────────
 
   const draftSessionMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session$/);

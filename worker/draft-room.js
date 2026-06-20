@@ -299,6 +299,9 @@ export class DraftRoom {
       await this.env.DB.prepare(
         "UPDATE draft_sessions SET status = 'completed', completed_at = ? WHERE id = ?"
       ).bind(now, this.draftSessionId).run();
+      await this.env.DB.prepare(
+        `UPDATE leagues SET phase = CASE WHEN league_format = 'dynasty' THEN 'pre_draft' ELSE 'active' END WHERE id = ?`
+      ).bind(this.leagueId).run();
       await this.state.storage.deleteAlarm();
     } else {
       this.pickDeadline = Date.now() + this.timerSeconds * 1000;
@@ -327,6 +330,9 @@ export class DraftRoom {
       await this.env.DB.prepare(
         "UPDATE draft_sessions SET status = 'completed', completed_at = ? WHERE id = ?"
       ).bind(now, this.draftSessionId).run();
+      await this.env.DB.prepare(
+        `UPDATE leagues SET phase = CASE WHEN league_format = 'dynasty' THEN 'pre_draft' ELSE 'active' END WHERE id = ?`
+      ).bind(this.leagueId).run();
       this.broadcastAll();
       return;
     }

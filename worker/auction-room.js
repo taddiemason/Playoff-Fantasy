@@ -370,6 +370,9 @@ export class AuctionRoom {
       await this.env.DB.prepare(
         "UPDATE auction_sessions SET status = 'completed', ended_at = ? WHERE id = ?"
       ).bind(now, this.auctionSessionId).run();
+      await this.env.DB.prepare(
+        `UPDATE leagues SET phase = CASE WHEN league_format = 'dynasty' THEN 'pre_draft' ELSE 'active' END WHERE id = ?`
+      ).bind(this.leagueId).run();
       this.status = 'completed';
       await this.state.storage.deleteAlarm();
       this.broadcastAll();
