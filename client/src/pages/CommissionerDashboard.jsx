@@ -47,6 +47,12 @@ export default function CommissionerDashboard() {
   const [draftMsg, setDraftMsg] = useState('')
   const [pickTimer, setPickTimer] = useState(() => league.config?.pick_timer_seconds ?? 90)
 
+  // Auction setup
+  const [auctionSession, setAuctionSession] = useState(null)
+  const [auctionMsg, setAuctionMsg] = useState('')
+  const [auctionBudget, setAuctionBudget] = useState(() => league.config?.auction_budget ?? 1000)
+  const [bidTimer, setBidTimer] = useState(() => league.config?.bid_timer_seconds ?? 30)
+
   const loadMembers = useCallback(() => {
     api.leagues.getMembers(leagueId).then(setMembers).catch((e) => setError(e.message))
   }, [leagueId])
@@ -64,6 +70,12 @@ export default function CommissionerDashboard() {
 
   useEffect(() => {
     api.leagues.draft.getSession(leagueId).then(d => setDraftSession(d.session)).catch(() => {})
+  }, [leagueId])
+
+  useEffect(() => {
+    api.leagues.auction.getSession(leagueId).then(data => {
+      if (data?.session) setAuctionSession(data.session);
+    }).catch(() => {});
   }, [leagueId])
 
   if (!isCommissioner) {
@@ -193,6 +205,24 @@ export default function CommissionerDashboard() {
       await api.leagues.update(leagueId, { pick_timer_seconds: Number(pickTimer) })
       setDraftMsg('Pick timer saved.')
     } catch (e) { setDraftMsg(e.message) }
+  }
+
+  async function createAuctionSession() {
+    try {
+      await api.leagues.auction.create(leagueId);
+      const data = await api.leagues.auction.getSession(leagueId);
+      setAuctionSession(data?.session || null);
+      setAuctionMsg('Auction session created.');
+    } catch (e) { setAuctionMsg(e.message); }
+  }
+
+  async function saveAuctionConfig() {
+    try {
+      await api.leagues.update(leagueId, {
+        config: { auction_budget: parseInt(auctionBudget), bid_timer_seconds: parseInt(bidTimer) }
+      });
+      setAuctionMsg('Auction settings saved.');
+    } catch (e) { setAuctionMsg(e.message); }
   }
 
   return (
@@ -406,6 +436,44 @@ export default function CommissionerDashboard() {
             <a href={`/leagues/${leagueId}/draft`}>Go to Draft Room →</a>
           </p>
         )}
+      </div>
+
+      {/* ── Auction Setup ── */}
+      <div className="card" style={{ marginTop: '1.5rem' }}>
+        <h3 style={{ marginTop: 0 }}>Auction Setup</h3>
+
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '1rem' }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: '0.8rem', color: '#888' }}>Budget per team ($)</span>
+            <input
+              type="number" min={100} max={10000} step={100}
+              value={auctionBudget}
+              onChange={e => setAuctionBudget(e.target.value)}
+              style={{ width: 100 }}
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: '0.8rem', color: '#888' }}>Bid timer (seconds)</span>
+            <input
+              type="number" min={10} max={120}
+              value={bidTimer}
+              onChange={e => setBidTimer(e.target.value)}
+              style={{ width: 80 }}
+            />
+          </label>
+          <button onClick={saveAuctionConfig}>Save</button>
+        </div>
+
+        {!auctionSession ? (
+          <button onClick={createAuctionSession}>Create Auction Session</button>
+        ) : (
+          <p style={{ color: '#888', fontSize: '0.85rem' }}>
+            Session status: <strong>{auctionSession.status}</strong> —{' '}
+            <a href={`/leagues/${leagueId}/auction`} style={{ color: '#3498db' }}>Go to Auction Room</a>
+          </p>
+        )}
+
+        {auctionMsg && <p style={{ color: '#e67e22', marginTop: '0.5rem' }}>{auctionMsg}</p>}
       </div>
 
       {/* ── Members ── */}
