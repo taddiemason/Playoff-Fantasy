@@ -243,6 +243,7 @@ export default function AuctionPage() {
   const [loading, setLoading] = useState(true);
   const [isCommissioner, setIsCommissioner] = useState(false);
   const [myTeamId, setMyTeamId] = useState(null);
+  const [caps, setCaps] = useState({ F: 10, D: 5, G: 3 });
   const { state: wsState, send, connected, error: wsError } = useAuctionSocket(leagueId);
 
   useEffect(() => {
@@ -255,6 +256,11 @@ export default function AuctionPage() {
         ]);
         setInitialData({ ...sessionData, teams: teamsData || [] });
         setIsCommissioner(leagueInfo?.owner_user_id === user?.id || leagueInfo?.my_role === 'commissioner');
+        setCaps({
+          F: leagueInfo?.config?.roster?.maxF ?? 10,
+          D: leagueInfo?.config?.roster?.maxD ?? 5,
+          G: leagueInfo?.config?.roster?.maxG ?? 3,
+        });
         const mine = (teamsData || []).find(t => t.user_id === user?.id);
         if (mine) setMyTeamId(mine.id);
       } catch {}
@@ -294,7 +300,7 @@ export default function AuctionPage() {
     myRoster: myTeamId ? null : null,
   };
 
-  const capsF = 10; const capsD = 5; const capsG = 3;
+  const capsF = caps.F; const capsD = caps.D; const capsG = caps.G;
   const isMyTurn = myTeamId && liveState.currentNominatorTeamId === myTeamId && liveState.status === 'active';
   const nomination = liveState.currentNomination;
   const nominatorName = liveState.draftOrder.find(t => t.teamId === liveState.currentNominatorTeamId)?.teamName;
