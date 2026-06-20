@@ -15,6 +15,7 @@ function LeagueNav({ leagueId, isCommissioner }) {
       <NavLink to={`/leagues/${leagueId}/waivers`} className={tab}>Waivers</NavLink>
       <NavLink to={`/leagues/${leagueId}/trades`} className={tab}>Trades</NavLink>
       <NavLink to={`/leagues/${leagueId}/draft`} className={tab}>Draft</NavLink>
+      <NavLink to={`/leagues/${leagueId}/auction`} className={({ isActive }) => tab(isActive)}>Auction</NavLink>
       <NavLink to={`/leagues/${leagueId}/rules`} className={tab}>Rules</NavLink>
       <NavLink to={`/leagues/${leagueId}/players`} className={tab}>Players</NavLink>
       <NavLink to={`/leagues/${leagueId}/add-players`} className={tab}>Add Players</NavLink>

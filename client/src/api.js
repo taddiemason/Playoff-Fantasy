@@ -195,6 +195,22 @@ export const api = {
         return new WebSocket(`${proto}://${window.location.host}/api/leagues/${id}/draft/ws`);
       },
     },
+
+    auction: {
+      getSession: (id) => request(`/api/leagues/${id}/auction/session`),
+      create:     (id) => request(`/api/leagues/${id}/auction/session`, { method: 'POST' }),
+      setOrder:   (id, order) => request(`/api/leagues/${id}/auction/session/order`, {
+        method: 'PUT', body: JSON.stringify({ order }),
+      }),
+      randomize:  (id) => request(`/api/leagues/${id}/auction/session/randomize`, { method: 'POST' }),
+      start:      (id) => request(`/api/leagues/${id}/auction/session/start`, { method: 'POST' }),
+      pause:      (id) => request(`/api/leagues/${id}/auction/session/pause`, { method: 'POST' }),
+      resume:     (id) => request(`/api/leagues/${id}/auction/session/resume`, { method: 'POST' }),
+      connect:    (id) => {
+        const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        return new WebSocket(`${proto}://${window.location.host}/api/leagues/${id}/auction/ws`);
+      },
+    },
   },
 
   // Invite codes (public preview + join)
