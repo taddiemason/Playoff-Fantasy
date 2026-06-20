@@ -1164,7 +1164,7 @@ async function handleApi(request, env, pathname) {
   // ── Season lifecycle ────────────────────────────────────────────────────────
 
   // POST /api/leagues/:id/season/end
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/end$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/end$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1203,7 +1203,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/season/keeper-window/open
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/keeper-window\/open$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/keeper-window\/open$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1218,7 +1218,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/season/keeper-window/close
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/keeper-window\/close$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/keeper-window\/close$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1265,7 +1265,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/season/start
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/start$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/start$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1282,7 +1282,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/season/activate
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/activate$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/season\/activate$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1317,7 +1317,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // GET /api/leagues/:id/keepers
-  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/keepers$/)) {
+  if (request.method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/keepers$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1386,7 +1386,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // PUT /api/leagues/:id/keepers
-  if (method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/keepers$/)) {
+  if (request.method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/keepers$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1466,7 +1466,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // DELETE /api/leagues/:id/keepers/:playerId
-  if (method === 'DELETE' && pathname.match(/^\/api\/leagues\/\d+\/keepers\/\d+$/)) {
+  if (request.method === 'DELETE' && pathname.match(/^\/api\/leagues\/\d+\/keepers\/\d+$/)) {
     const parts = pathname.split('/');
     const leagueId = parseId(parts[3]);
     const playerId = parseId(parts[5]);
@@ -1484,7 +1484,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // PUT /api/leagues/:id/taxi
-  if (method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/taxi$/)) {
+  if (request.method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/taxi$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1514,7 +1514,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // GET /api/leagues/:id/roster-snapshots
-  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/roster-snapshots$/)) {
+  if (request.method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/roster-snapshots$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1780,7 +1780,7 @@ async function handleApi(request, env, pathname) {
   // ── Auction ───────────────────────────────────────────────────────────────
 
   // POST /api/leagues/:id/auction/session — create or reset pending session
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1804,7 +1804,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // GET /api/leagues/:id/auction/session
-  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session$/)) {
+  if (request.method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1832,7 +1832,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // PUT /api/leagues/:id/auction/session/order
-  if (method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/order$/)) {
+  if (request.method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/order$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1859,7 +1859,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/auction/session/randomize
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/randomize$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/randomize$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1880,7 +1880,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/auction/session/start
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/start$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/start$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1954,7 +1954,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // GET /api/leagues/:id/auction/ws — WebSocket proxy
-  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/auction\/ws$/)) {
+  if (request.method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/auction\/ws$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1977,7 +1977,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/auction/session/pause
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/pause$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/pause$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
@@ -1994,7 +1994,7 @@ async function handleApi(request, env, pathname) {
   }
 
   // POST /api/leagues/:id/auction/session/resume
-  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/resume$/)) {
+  if (request.method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/resume$/)) {
     const leagueId = parseId(pathname.split('/')[3]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
