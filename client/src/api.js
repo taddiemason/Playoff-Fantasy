@@ -235,6 +235,14 @@ export const api = {
     },
 
     rosterSnapshots: (id) => request(`/api/leagues/${id}/roster-snapshots`),
+
+    chat: {
+      messages: (id, limit = 50) => request(`/api/leagues/${id}/chat/messages?limit=${limit}`),
+      connect: (id) => {
+        const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+        return new WebSocket(`${proto}://${window.location.host}/api/leagues/${id}/chat/ws`)
+      },
+    },
   },
 
   // Invite codes (public preview + join)

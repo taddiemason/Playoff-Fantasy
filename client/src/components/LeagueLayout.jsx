@@ -17,6 +17,7 @@ export default function LeagueLayout() {
   const [league, setLeague] = useState(null)
   const [status, setStatus] = useState('loading')
   const [errorMsg, setErrorMsg] = useState('')
+  const [chatUnread, setChatUnread] = useState(false)
 
   const refreshLeague = useCallback(async () => {
     try {
@@ -30,6 +31,11 @@ export default function LeagueLayout() {
   }, [leagueId])
 
   useEffect(() => { if (user) refreshLeague() }, [user, refreshLeague])
+
+  useEffect(() => {
+    const lastRead = localStorage.getItem(`chatLastRead_${leagueId}`)
+    setChatUnread(!lastRead)
+  }, [leagueId])
 
   if (authLoading || (user && status === 'loading')) {
     return <div className="loading-state"><span className="loading-spinner"></span> Loading league…</div>
@@ -59,6 +65,9 @@ export default function LeagueLayout() {
         <NavLink to={`/leagues/${leagueId}/schedule`} className={({ isActive }) => tab(isActive)}>Schedule</NavLink>
         <NavLink to={`/leagues/${leagueId}/waivers`} className={({ isActive }) => tab(isActive)}>Waivers</NavLink>
         <NavLink to={`/leagues/${leagueId}/trades`} className={({ isActive }) => tab(isActive)}>Trades</NavLink>
+        <NavLink to={`/leagues/${leagueId}/chat`} className={({ isActive }) => tab(isActive)} onClick={() => setChatUnread(false)}>
+          Chat{chatUnread && <span className="chat-unread-dot" />}
+        </NavLink>
         <NavLink to={`/leagues/${leagueId}/draft`} className={({ isActive }) => tab(isActive)}>Draft</NavLink>
         <NavLink to={`/leagues/${leagueId}/auction`} className={({ isActive }) => tab(isActive)}>Auction</NavLink>
         {showKeepers && (
