@@ -45,6 +45,30 @@ async function getNhlRosterCache() {
   return nhlRosterCache;
 }
 
+async function syncNhlRosters(db) {
+  const season = getCurrentSeason();
+  const now = new Date().toISOString();
+  const players = await getNhlRosterCache();
+  if (!players.length) return 0;
+  // Upsert in batches of 100
+  for (let i = 0; i < players.length; i += 100) {
+    const batch = players.slice(i, i + 100);
+    await db.batch(batch.map(p =>
+      db.prepare(
+        `INSERT INTO nhl_players (player_id, name, position_code, nhl_team, sweater_num, headshot_url, season, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(player_id) DO UPDATE SET
+           name = excluded.name, position_code = excluded.position_code,
+           nhl_team = excluded.nhl_team, sweater_num = excluded.sweater_num,
+           headshot_url = excluded.headshot_url, season = excluded.season,
+           synced_at = excluded.synced_at`
+      ).bind(p.playerId, p.name, p.positionCode, p.teamAbbrev, p.sweaterNumber || null,
+             p.headshot || '', season, now)
+    ));
+  }
+  return players.length;
+}
+
 // Standings state is keyed per league so leagues never clobber each other's
 // goalie pools or cached results. The key is the league id (or '__global__'
 // for the legacy single-pool standings endpoint).
@@ -2881,26 +2905,32 @@ async function handleApi(request, env, pathname) {
   if (pathname === '/api/nhl/search' && request.method === 'GET') {
     const q = new URL(request.url).searchParams.get('q') || '';
     if (!q.trim() || q.trim().length < 2) return json([]);
+
+    // Query the persistent D1 cache first
+    const { results: dbResults } = await db
+      .prepare(`SELECT player_id, name, position_code, nhl_team, sweater_num, headshot_url
+                FROM nhl_players WHERE name LIKE ? ORDER BY name LIMIT 20`)
+      .bind(`%${q.trim()}%`)
+      .all();
+
+    if (dbResults && dbResults.length > 0) {
+      return json(dbResults.map(p => ({
+        playerId: p.player_id,
+        name: p.name,
+        positionCode: p.position_code,
+        teamAbbrev: p.nhl_team,
+        sweaterNumber: p.sweater_num || '',
+        headshot: normalizeHeadshotUrl(p.headshot_url),
+      })));
+    }
+
+    // D1 cache empty (first run before cron) — fall back to in-memory roster fetch
     try {
       const allPlayers = await getNhlRosterCache();
       const lower = q.trim().toLowerCase();
       return json(allPlayers.filter(p => p.name.toLowerCase().includes(lower)).slice(0, 20));
     } catch {
-      // Fallback to DB if roster fetch fails
-      const { results } = await db
-        .prepare(
-          `SELECT DISTINCT player_id, player_name, nhl_team, position, position_detail, headshot_url
-           FROM team_players WHERE player_name LIKE ? ORDER BY player_name LIMIT 20`
-        )
-        .bind(`%${q.trim()}%`)
-        .all();
-      return json((results || []).map(p => ({
-        playerId: p.player_id,
-        name: p.player_name,
-        positionCode: p.position_detail || p.position,
-        teamAbbrev: p.nhl_team,
-        headshot: normalizeHeadshotUrl(p.headshot_url),
-      })));
+      return json([]);
     }
   }
 
@@ -2935,6 +2965,17 @@ async function handleApi(request, env, pathname) {
       );
     }
     return json({ success: true, season, eliminatedTeams: teams });
+  }
+
+  if (pathname === '/api/admin/sync-nhl-players' && request.method === 'POST') {
+    const authErr = requireAuth(request, env); if (authErr) return authErr;
+    try {
+      nhlRosterCache = null; // force fresh fetch
+      const count = await syncNhlRosters(db);
+      return json({ ok: true, synced: count });
+    } catch (e) {
+      return json({ error: e.message }, { status: 500 });
+    }
   }
 
   if (pathname === '/api/admin/backfill-headshots' && request.method === 'POST') {
@@ -3487,6 +3528,14 @@ export default {
     } catch (err) {
       console.error('[cron] failed to list leagues:', err?.message ?? err);
     }
+    // Sync NHL rosters to D1 for persistent player search
+    try {
+      nhlRosterCache = null; // force fresh roster data each cron run
+      await syncNhlRosters(db);
+    } catch (err) {
+      console.error('[cron] NHL roster sync failed:', err?.message ?? err);
+    }
+
     // Also recompute the legacy global pool (covers any not-yet-migrated teams).
     try {
       await computeStandings(db, { leagueId: null, season: getCurrentSeason(), config: DEFAULT_LEAGUE_CONFIG });
