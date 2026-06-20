@@ -1143,6 +1143,7 @@ async function handleApi(request, env, pathname) {
     const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
       .bind(leagueId, ctx.user.id).first();
     if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
 
     const player = await db.prepare('SELECT * FROM team_players WHERE team_id = ? AND player_id = ?')
       .bind(team.id, playerId).first();
@@ -1204,6 +1205,7 @@ async function handleApi(request, env, pathname) {
     const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
       .bind(leagueId, ctx.user.id).first();
     if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
 
     const dp = await db.prepare('SELECT id, status, waiver_deadline FROM dropped_players WHERE id = ? AND league_id = ?')
       .bind(dropped_player_id, leagueId).first();
@@ -1261,6 +1263,7 @@ async function handleApi(request, env, pathname) {
     const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
       .bind(leagueId, ctx.user.id).first();
     if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
 
     const dp = await db.prepare('SELECT * FROM dropped_players WHERE id = ? AND league_id = ?')
       .bind(droppedPlayerId, leagueId).first();
@@ -1269,14 +1272,28 @@ async function handleApi(request, env, pathname) {
 
     const meta = JSON.parse(dp.player_meta_json || '{}');
 
-    await db.batch([
-      db.prepare(`UPDATE dropped_players SET status = 'claimed' WHERE id = ?`).bind(droppedPlayerId),
-      db.prepare(`INSERT INTO team_players
-        (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url)
-        VALUES (?, ?, ?, ?, ?, '', ?, ?)`)
-        .bind(team.id, dp.player_id, dp.player_name, meta.nhl_team || '', meta.position || '',
-              meta.headshot_url || '', meta.crest_url || ''),
-    ]);
+    const config = mergeConfig(ctx.league.config_json);
+    const pos = meta.position || '';
+    const capKey = pos === 'G' ? 'maxG' : pos === 'D' ? 'maxD' : 'maxF';
+    const { results: roster } = await db.prepare(
+      `SELECT id FROM team_players WHERE team_id = ? AND position = ?`
+    ).bind(team.id, pos).all();
+    if ((roster || []).length >= (config.roster[capKey] ?? 99)) {
+      return json({ error: `Roster full for position ${pos}` }, { status: 400 });
+    }
+
+    try {
+      await db.batch([
+        db.prepare(`UPDATE dropped_players SET status = 'claimed' WHERE id = ?`).bind(droppedPlayerId),
+        db.prepare(`INSERT INTO team_players
+          (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url)
+          VALUES (?, ?, ?, ?, ?, '', ?, ?)`)
+          .bind(team.id, dp.player_id, dp.player_name, meta.nhl_team || '', meta.position || '',
+                meta.headshot_url || '', meta.crest_url || ''),
+      ]);
+    } catch {
+      return json({ error: 'Player is already on your team' }, { status: 400 });
+    }
 
     return json({ ok: true });
   }
@@ -1331,6 +1348,7 @@ async function handleApi(request, env, pathname) {
     const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
       .bind(leagueId, ctx.user.id).first();
     if (!myTeam) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
     if (myTeam.id === receiving_team_id) return json({ error: 'Cannot trade with yourself' }, { status: 400 });
 
     const receivingTeam = await db.prepare('SELECT id FROM teams WHERE id = ? AND league_id = ?')
@@ -2391,6 +2409,24 @@ async function processWaivers(db, leagueId) {
     }
 
     const meta = JSON.parse(dp.player_meta_json || '{}');
+    const pos = meta.position || '';
+    const capKey = pos === 'G' ? 'maxG' : pos === 'D' ? 'maxD' : 'maxF';
+
+    const leagueRow = await db.prepare('SELECT config_json FROM leagues WHERE id = ?').bind(leagueId).first();
+    const cfg = mergeConfig(leagueRow?.config_json);
+    const { results: currentRoster } = await db.prepare(
+      `SELECT id FROM team_players WHERE team_id = ? AND position = ?`
+    ).bind(winnerClaim.team_id, pos).all();
+    const atCap = (currentRoster || []).length >= (cfg.roster[capKey] ?? 99);
+
+    if (atCap && !winnerClaim.drop_player_id) {
+      // Winning team is at cap and didn't specify a drop — deny their claim, player becomes free agent
+      await db.prepare(`UPDATE waiver_claims SET status = 'denied', processed_at = ?
+        WHERE id = ?`).bind(now, winnerClaim.id).run();
+      await db.prepare(`UPDATE dropped_players SET status = 'free_agent' WHERE id = ?`).bind(dp.id).run();
+      continue;
+    }
+
     const batchOps = [
       db.prepare(`UPDATE dropped_players SET status = 'claimed' WHERE id = ?`).bind(dp.id),
       db.prepare(`UPDATE waiver_claims SET status = 'approved', processed_at = ? WHERE id = ?`).bind(now, winnerClaim.id),
@@ -2410,7 +2446,12 @@ async function processWaivers(db, leagueId) {
       );
     }
 
-    await db.batch(batchOps);
+    try {
+      await db.batch(batchOps);
+    } catch {
+      console.error(`[cron] waiver claim ${winnerClaim.id} batch failed (unique constraint?)`, leagueId);
+      continue;
+    }
 
     // Move winning team to last waiver priority
     const winTeam = await db.prepare('SELECT user_id FROM teams WHERE id = ?').bind(winnerClaim.team_id).first();
@@ -2437,6 +2478,19 @@ async function executeTrades(db, leagueId) {
     const { results: items } = await db.prepare('SELECT * FROM trade_items WHERE trade_id = ?')
       .bind(trade.id).all();
 
+    // Verify every player is still on their original team
+    let valid = true;
+    for (const item of (items || [])) {
+      const still = await db.prepare('SELECT id FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(item.from_team_id, item.player_id).first();
+      if (!still) { valid = false; break; }
+    }
+
+    if (!valid) {
+      await db.prepare(`UPDATE trade_proposals SET status = 'expired' WHERE id = ?`).bind(trade.id).run();
+      continue;
+    }
+
     const batchOps = (items || []).map(item => {
       const toTeamId = item.from_team_id === trade.proposing_team_id
         ? trade.receiving_team_id
@@ -2448,7 +2502,11 @@ async function executeTrades(db, leagueId) {
       db.prepare(`UPDATE trade_proposals SET status = 'executed' WHERE id = ?`).bind(trade.id)
     );
 
-    await db.batch(batchOps);
+    try {
+      await db.batch(batchOps);
+    } catch {
+      await db.prepare(`UPDATE trade_proposals SET status = 'expired' WHERE id = ?`).bind(trade.id).run();
+    }
   }
 
   // Expire stale pending trades
