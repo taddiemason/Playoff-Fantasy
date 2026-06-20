@@ -1132,6 +1132,66 @@ async function handleApi(request, env, pathname) {
     return json({ scored });
   }
 
+  // ── Waivers ───────────────────────────────────────────────────────────────
+  const dropPlayerMatch = pathname.match(/^\/api\/leagues\/(\d+)\/players\/(\d+)\/drop$/);
+  if (dropPlayerMatch && request.method === 'POST') {
+    const leagueId = parseId(dropPlayerMatch[1]);
+    const playerId = parseId(dropPlayerMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+
+    const player = await db.prepare('SELECT * FROM team_players WHERE team_id = ? AND player_id = ?')
+      .bind(team.id, playerId).first();
+    if (!player) return json({ error: 'Player not on your team' }, { status: 404 });
+
+    const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const meta = JSON.stringify({
+      position: player.position,
+      nhl_team: player.nhl_team,
+      headshot_url: player.headshot_url,
+      crest_url: player.crest_url,
+    });
+
+    await db.batch([
+      db.prepare('DELETE FROM team_players WHERE id = ?').bind(player.id),
+      db.prepare(`INSERT INTO dropped_players
+        (league_id, player_id, player_name, player_meta_json, dropped_by_team_id, status, waiver_deadline)
+        VALUES (?, ?, ?, ?, ?, 'waivers', ?)`)
+        .bind(leagueId, playerId, player.player_name, meta, team.id, deadline),
+    ]);
+
+    return json({ ok: true, waiver_deadline: deadline });
+  }
+
+  const waiversListMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers$/);
+  if (waiversListMatch && request.method === 'GET') {
+    const leagueId = parseId(waiversListMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { results: players } = await db.prepare(`
+      SELECT dp.*, t.name AS dropped_by_team_name
+      FROM dropped_players dp
+      JOIN teams t ON t.id = dp.dropped_by_team_id
+      WHERE dp.league_id = ? AND dp.status IN ('waivers', 'free_agent')
+      ORDER BY dp.dropped_at DESC
+    `).bind(leagueId).all();
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+
+    const myClaims = myTeam
+      ? (await db.prepare(`SELECT * FROM waiver_claims WHERE team_id = ? AND status = 'pending'`)
+          .bind(myTeam.id).all()).results || []
+      : [];
+
+    return json({ players: players || [], myClaims });
+  }
+
   // League-scoped teams
   const lgTeamsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams$/);
   if (lgTeamsMatch && request.method === 'GET') {
