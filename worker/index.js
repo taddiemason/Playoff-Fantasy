@@ -9,6 +9,8 @@ import {
   parseCookies,
 } from './auth.js';
 
+export { DraftRoom } from './draft-room.js';
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const STATS_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh (shared raw NHL data)
