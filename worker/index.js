@@ -1316,6 +1316,218 @@ async function handleApi(request, env, pathname) {
     return json({ ok: true });
   }
 
+  // GET /api/leagues/:id/keepers
+  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/keepers$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const config = mergeConfig(ctx.league.config_json);
+
+    // All designations for current season
+    const { results: designations } = await db.prepare(
+      'SELECT * FROM keeper_designations WHERE league_id = ? AND season = ? ORDER BY team_id, player_name'
+    ).bind(leagueId, ctx.league.season).all();
+
+    // My team
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+
+    // My roster with cost_value pre-calculated
+    let myRoster = [];
+    if (myTeam) {
+      const { results: players } = await db.prepare(
+        `SELECT tp.player_id, tp.player_name, tp.position, tp.nhl_team, tp.headshot_url, tp.crest_url
+         FROM team_players tp WHERE tp.team_id = ?`
+      ).bind(myTeam.id).all();
+
+      myRoster = await Promise.all((players || []).map(async (p) => {
+        let costValue = 0;
+        if (config.keeper_cost_type === 'pick_round') {
+          const row = await db.prepare(
+            `SELECT dp.round FROM draft_picks dp
+             JOIN draft_sessions ds ON ds.id = dp.draft_session_id
+             WHERE ds.league_id = ? AND dp.player_id = ?
+             ORDER BY dp.picked_at DESC LIMIT 1`
+          ).bind(leagueId, p.player_id).first();
+          costValue = row?.round ?? 0;
+        } else if (config.keeper_cost_type === 'auction_inflation') {
+          const row = await db.prepare(
+            `SELECT ap.amount FROM auction_picks ap
+             JOIN auction_sessions asess ON asess.id = ap.auction_session_id
+             WHERE asess.league_id = ? AND ap.player_id = ?
+             ORDER BY ap.picked_at DESC LIMIT 1`
+          ).bind(leagueId, p.player_id).first();
+          const base = row?.amount ?? 0;
+          costValue = Math.round(base * (1 + config.keeper_cost_inflation_pct / 100));
+        }
+        return { ...p, costValue };
+      }));
+    }
+
+    // All teams' designation counts (for commissioner readiness)
+    const { results: allTeams } = await db.prepare('SELECT id, name FROM teams WHERE league_id = ? ORDER BY name').bind(leagueId).all();
+    const countMap = {};
+    for (const d of (designations || [])) {
+      countMap[d.team_id] = (countMap[d.team_id] || 0) + 1;
+    }
+    const teams = (allTeams || []).map(t => ({ ...t, designationCount: countMap[t.id] || 0 }));
+
+    return json({
+      designations: designations || [],
+      config: {
+        maxKeepers: config.max_keepers,
+        keeperCostType: config.keeper_cost_type,
+        keeperCostInflationPct: config.keeper_cost_inflation_pct,
+      },
+      myTeamId: myTeam?.id ?? null,
+      myRoster,
+      teams,
+    });
+  }
+
+  // PUT /api/leagues/:id/keepers
+  if (method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/keepers$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (ctx.league.phase !== 'keeper_window')
+      return json({ error: 'Keeper window is not open' }, { status: 400 });
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!myTeam) return json({ error: 'You do not have a team in this league' }, { status: 403 });
+
+    const config = mergeConfig(ctx.league.config_json);
+    const body = await request.json();
+    const keepers = Array.isArray(body.keepers) ? body.keepers : [];
+
+    if (keepers.length > config.max_keepers)
+      return json({ error: `Maximum ${config.max_keepers} keepers allowed` }, { status: 400 });
+
+    const now = new Date().toISOString();
+    const currentSeason = ctx.league.season;
+
+    // Calculate cost for each keeper
+    const upserts = await Promise.all(keepers.map(async (k) => {
+      let costValue = 0;
+      const costType = config.keeper_cost_type;
+      if (costType === 'pick_round') {
+        const row = await db.prepare(
+          `SELECT dp.round FROM draft_picks dp
+           JOIN draft_sessions ds ON ds.id = dp.draft_session_id
+           WHERE ds.league_id = ? AND dp.player_id = ?
+           ORDER BY dp.picked_at DESC LIMIT 1`
+        ).bind(leagueId, k.playerId).first();
+        costValue = row?.round ?? 0;
+      } else if (costType === 'auction_inflation') {
+        const row = await db.prepare(
+          `SELECT ap.amount FROM auction_picks ap
+           JOIN auction_sessions asess ON asess.id = ap.auction_session_id
+           WHERE asess.league_id = ? AND ap.player_id = ?
+           ORDER BY ap.picked_at DESC LIMIT 1`
+        ).bind(leagueId, k.playerId).first();
+        const base = row?.amount ?? 0;
+        costValue = Math.round(base * (1 + config.keeper_cost_inflation_pct / 100));
+      }
+      const meta = JSON.stringify(k.playerMeta || {});
+      return db.prepare(
+        `INSERT INTO keeper_designations
+           (league_id, team_id, player_id, player_name, player_meta_json, cost_type, cost_value, season, designated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(league_id, team_id, player_id, season) DO UPDATE SET
+           player_name = excluded.player_name,
+           player_meta_json = excluded.player_meta_json,
+           cost_type = excluded.cost_type,
+           cost_value = excluded.cost_value,
+           designated_at = excluded.designated_at`
+      ).bind(leagueId, myTeam.id, k.playerId, k.playerName, meta, costType, costValue, currentSeason, now);
+    }));
+
+    // Delete designations not in new list
+    const keepingIds = keepers.map(k => k.playerId);
+    const { results: existing } = await db.prepare(
+      'SELECT player_id FROM keeper_designations WHERE league_id = ? AND team_id = ? AND season = ?'
+    ).bind(leagueId, myTeam.id, currentSeason).all();
+    const toRemove = (existing || []).filter(e => !keepingIds.includes(e.player_id));
+    const deleteStmts = toRemove.map(e =>
+      db.prepare('DELETE FROM keeper_designations WHERE league_id = ? AND team_id = ? AND player_id = ? AND season = ?')
+        .bind(leagueId, myTeam.id, e.player_id, currentSeason)
+    );
+
+    const allStmts = [...upserts, ...deleteStmts];
+    for (let i = 0; i < allStmts.length; i += 100) {
+      await db.batch(allStmts.slice(i, i + 100));
+    }
+
+    const { results: designations } = await db.prepare(
+      'SELECT * FROM keeper_designations WHERE league_id = ? AND team_id = ? AND season = ?'
+    ).bind(leagueId, myTeam.id, currentSeason).all();
+    return json({ ok: true, designations: designations || [] });
+  }
+
+  // DELETE /api/leagues/:id/keepers/:playerId
+  if (method === 'DELETE' && pathname.match(/^\/api\/leagues\/\d+\/keepers\/\d+$/)) {
+    const parts = pathname.split('/');
+    const leagueId = parseId(parts[3]);
+    const playerId = parseId(parts[5]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (ctx.league.phase !== 'keeper_window')
+      return json({ error: 'Keeper window is not open' }, { status: 400 });
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!myTeam) return json({ error: 'No team found' }, { status: 403 });
+    await db.prepare(
+      'DELETE FROM keeper_designations WHERE league_id = ? AND team_id = ? AND player_id = ? AND season = ?'
+    ).bind(leagueId, myTeam.id, playerId, ctx.league.season).run();
+    return json({ ok: true });
+  }
+
+  // PUT /api/leagues/:id/taxi
+  if (method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/taxi$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (ctx.league.league_format !== 'dynasty')
+      return json({ error: 'Taxi squad is only available in dynasty leagues' }, { status: 400 });
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!myTeam) return json({ error: 'No team found' }, { status: 403 });
+    const body = await request.json();
+    const { player_id, is_taxi_squad } = body;
+    if (typeof player_id !== 'number' || typeof is_taxi_squad !== 'boolean')
+      return json({ error: 'player_id (number) and is_taxi_squad (boolean) required' }, { status: 400 });
+
+    if (is_taxi_squad) {
+      const config = mergeConfig(ctx.league.config_json);
+      const taxiCount = await db.prepare(
+        'SELECT COUNT(*) AS c FROM team_players WHERE team_id = ? AND is_taxi_squad = 1'
+      ).bind(myTeam.id).first();
+      if ((taxiCount?.c ?? 0) >= config.taxi_squad_size)
+        return json({ error: `Taxi squad is full (max ${config.taxi_squad_size})` }, { status: 400 });
+    }
+
+    await db.prepare(
+      'UPDATE team_players SET is_taxi_squad = ? WHERE team_id = ? AND player_id = ?'
+    ).bind(is_taxi_squad ? 1 : 0, myTeam.id, player_id).run();
+    return json({ ok: true });
+  }
+
+  // GET /api/leagues/:id/roster-snapshots
+  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/roster-snapshots$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const { results } = await db.prepare(
+      `SELECT rs.*, t.name AS team_name
+       FROM roster_snapshots rs
+       JOIN teams t ON t.id = rs.team_id
+       WHERE rs.league_id = ?
+       ORDER BY rs.season DESC, rs.team_id, rs.player_name`
+    ).bind(leagueId).all();
+    return json({ snapshots: results || [] });
+  }
+
   // ── Draft ────────────────────────────────────────────────────────────────
 
   const draftSessionMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session$/);
