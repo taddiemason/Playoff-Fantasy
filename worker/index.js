@@ -1390,6 +1390,239 @@ async function handleApi(request, env, pathname) {
     return json({ ok: true, pickDeadline });
   }
 
+  // ── Auction ───────────────────────────────────────────────────────────────
+
+  // POST /api/leagues/:id/auction/session — create or reset pending session
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const existing = await db.prepare('SELECT id, status FROM auction_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (existing) {
+      if (existing.status !== 'pending')
+        return json({ error: 'Cannot reset an active or completed auction session' }, { status: 400 });
+      await db.prepare(
+        "UPDATE auction_sessions SET draft_order_json = '[]', current_nominator_idx = 0, current_nomination_json = NULL WHERE id = ?"
+      ).bind(existing.id).run();
+      return json({ id: existing.id });
+    }
+    const config = mergeConfig(ctx.league.config_json);
+    const session = await db.prepare(
+      'INSERT INTO auction_sessions (league_id, budget_per_team, bid_timer_seconds) VALUES (?, ?, ?) RETURNING id'
+    ).bind(leagueId, config.auction_budget, config.bid_timer_seconds).first();
+    return json({ id: session.id });
+  }
+
+  // GET /api/leagues/:id/auction/session
+  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const session = await db.prepare('SELECT * FROM auction_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ session: null, picks: [], myBudget: null });
+
+    session.draft_order = JSON.parse(session.draft_order_json || '[]');
+    session.current_nomination = session.current_nomination_json
+      ? JSON.parse(session.current_nomination_json) : null;
+
+    const { results: picks } = await db.prepare(
+      'SELECT * FROM auction_picks WHERE auction_session_id = ? ORDER BY pick_number'
+    ).bind(session.id).all();
+    const parsedPicks = (picks || []).map(p => ({ ...p, player_meta: JSON.parse(p.player_meta_json || '{}') }));
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    const myBudget = myTeam
+      ? await db.prepare('SELECT budget_remaining FROM auction_budgets WHERE auction_session_id = ? AND team_id = ?')
+          .bind(session.id, myTeam.id).first()
+      : null;
+
+    return json({ session, picks: parsedPicks, myBudget: myBudget?.budget_remaining ?? null });
+  }
+
+  // PUT /api/leagues/:id/auction/session/order
+  if (method === 'PUT' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/order$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const session = await db.prepare('SELECT id, status FROM auction_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No auction session' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Session already started' }, { status: 400 });
+
+    const body = await request.json();
+    const { order } = body;
+    if (!Array.isArray(order)) return json({ error: 'order must be an array' }, { status: 400 });
+
+    const { results: leagueTeams } = await db.prepare('SELECT id FROM teams WHERE league_id = ?').bind(leagueId).all();
+    const validIds = new Set((leagueTeams || []).map(t => t.id));
+    for (const entry of order) {
+      if (!validIds.has(entry.teamId)) return json({ error: `Unknown team id: ${entry.teamId}` }, { status: 400 });
+    }
+
+    await db.prepare('UPDATE auction_sessions SET draft_order_json = ? WHERE id = ?')
+      .bind(JSON.stringify(order), session.id).run();
+    return json({ ok: true });
+  }
+
+  // POST /api/leagues/:id/auction/session/randomize
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/randomize$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const session = await db.prepare('SELECT id, status FROM auction_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No auction session' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Session already started' }, { status: 400 });
+
+    const { results: teams } = await db.prepare('SELECT id, name FROM teams WHERE league_id = ?').bind(leagueId).all();
+    const order = (teams || [])
+      .map(t => ({ teamId: t.id, teamName: t.name }))
+      .sort(() => Math.random() - 0.5);
+    await db.prepare('UPDATE auction_sessions SET draft_order_json = ? WHERE id = ?')
+      .bind(JSON.stringify(order), session.id).run();
+    return json({ order });
+  }
+
+  // POST /api/leagues/:id/auction/session/start
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/start$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const session = await db.prepare('SELECT * FROM auction_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No auction session' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Session already started' }, { status: 400 });
+
+    const draftOrder = JSON.parse(session.draft_order_json || '[]');
+    if (draftOrder.length === 0) return json({ error: 'Draft order not set' }, { status: 400 });
+
+    // Seed player rankings from NHL API (same pattern as snake draft)
+    try {
+      const [skatersRes, goaliesRes] = await Promise.all([
+        fetch(`${NHL_BASE}/leaders/skaters/points?limit=200&season=20252026&gameType=3`),
+        fetch(`${NHL_BASE}/leaders/goalies/wins?limit=30&season=20252026&gameType=3`),
+      ]);
+      const [skatersData, goaliesData] = await Promise.all([skatersRes.json(), goaliesRes.json()]);
+
+      const rankInserts = [];
+      let rank = 1;
+      for (const s of (skatersData?.skaterPoints || [])) {
+        const pid = s.id || s.playerId;
+        const pname = s.name?.default || `${s.firstName?.default || ''} ${s.lastName?.default || ''}`.trim();
+        const pos = s.positionCode || 'F';
+        const headshot = normalizeHeadshotUrl(s.headshot || '');
+        const meta = JSON.stringify({ position: pos, nhl_team: s.teamAbbrevs || '', headshot_url: headshot, crest_url: '' });
+        rankInserts.push(db.prepare(
+          'INSERT OR IGNORE INTO auction_player_rankings (auction_session_id, player_id, player_name, player_meta_json, global_rank) VALUES (?, ?, ?, ?, ?)'
+        ).bind(session.id, pid, pname, meta, rank++));
+      }
+      for (const g of (goaliesData?.goalieWins || [])) {
+        const pid = g.id || g.playerId;
+        const pname = g.name?.default || `${g.firstName?.default || ''} ${g.lastName?.default || ''}`.trim();
+        const headshot = normalizeHeadshotUrl(g.headshot || '');
+        const meta = JSON.stringify({ position: 'G', nhl_team: g.teamAbbrevs || '', headshot_url: headshot, crest_url: '' });
+        rankInserts.push(db.prepare(
+          'INSERT OR IGNORE INTO auction_player_rankings (auction_session_id, player_id, player_name, player_meta_json, global_rank) VALUES (?, ?, ?, ?, ?)'
+        ).bind(session.id, pid, pname, meta, rank++));
+      }
+      for (let i = 0; i < rankInserts.length; i += 100) {
+        await db.batch(rankInserts.slice(i, i + 100));
+      }
+    } catch (e) {
+      console.error('[auction/start] rankings seed failed:', e?.message);
+    }
+
+    // Init budgets for all teams in draft order
+    const budgetInserts = draftOrder.map(t =>
+      db.prepare('INSERT OR REPLACE INTO auction_budgets (auction_session_id, team_id, budget_remaining) VALUES (?, ?, ?)')
+        .bind(session.id, t.teamId, session.budget_per_team)
+    );
+    if (budgetInserts.length > 0) await db.batch(budgetInserts);
+
+    const now = new Date().toISOString();
+    await db.prepare(
+      "UPDATE auction_sessions SET status = 'active', started_at = ? WHERE id = ?"
+    ).bind(now, session.id).run();
+
+    // Trigger DO alarm-reset so it rehydrates and waits for first nomination
+    const doId = env.AUCTION_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.AUCTION_ROOM.get(doId);
+    await stub.fetch(new Request('https://internal/alarm-reset', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    }));
+
+    return json({ ok: true });
+  }
+
+  // GET /api/leagues/:id/auction/ws — WebSocket proxy
+  if (method === 'GET' && pathname.match(/^\/api\/leagues\/\d+\/auction\/ws$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    const isComm = isCommissioner(ctx.league, ctx.role, ctx.user.id);
+
+    const doId = env.AUCTION_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.AUCTION_ROOM.get(doId);
+    return stub.fetch(new Request(request.url, {
+      headers: new Headers({
+        ...Object.fromEntries(request.headers),
+        'X-League-Id': String(leagueId),
+        'X-User-Id':   String(ctx.user.id),
+        'X-Team-Id':   String(myTeam?.id ?? ''),
+        'X-Is-Commissioner': String(isComm),
+      }),
+    }));
+  }
+
+  // POST /api/leagues/:id/auction/session/pause
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/pause$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+
+    await db.prepare("UPDATE auction_sessions SET status = 'paused' WHERE league_id = ?").bind(leagueId).run();
+    const doId = env.AUCTION_ROOM.idFromName(`league-${leagueId}`);
+    await env.AUCTION_ROOM.get(doId).fetch(new Request('https://internal/pause', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    }));
+    return json({ ok: true });
+  }
+
+  // POST /api/leagues/:id/auction/session/resume
+  if (method === 'POST' && pathname.match(/^\/api\/leagues\/\d+\/auction\/session\/resume$/)) {
+    const leagueId = parseId(pathname.split('/')[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id))
+      return json({ error: 'Commissioner only' }, { status: 403 });
+
+    await db.prepare("UPDATE auction_sessions SET status = 'active' WHERE league_id = ?").bind(leagueId).run();
+    const doId = env.AUCTION_ROOM.idFromName(`league-${leagueId}`);
+    await env.AUCTION_ROOM.get(doId).fetch(new Request('https://internal/alarm-reset', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    }));
+    return json({ ok: true });
+  }
+
   // ── Waivers ───────────────────────────────────────────────────────────────
   const dropPlayerMatch = pathname.match(/^\/api\/leagues\/(\d+)\/players\/(\d+)\/drop$/);
   if (dropPlayerMatch && request.method === 'POST') {
@@ -2827,6 +3060,24 @@ export default {
           }
         } catch (err) {
           console.error(`[cron] league ${league.id} stalled draft recovery failed:`, err?.message ?? err);
+        }
+        try {
+          const stalledAuction = await db.prepare(`
+            SELECT id FROM auction_sessions
+            WHERE status = 'active' AND league_id = ?
+              AND current_nomination_json IS NOT NULL
+              AND json_extract(current_nomination_json, '$.bidDeadline') < datetime('now', '-2 minutes')
+          `).bind(league.id).first();
+          if (stalledAuction) {
+            const doId = env.AUCTION_ROOM.idFromName(`league-${league.id}`);
+            const stub = env.AUCTION_ROOM.get(doId);
+            await stub.fetch(new Request('https://internal/alarm-reset', {
+              method: 'POST',
+              headers: { 'X-League-Id': String(league.id) },
+            }));
+          }
+        } catch (err) {
+          console.error(`[cron] league ${league.id} stalled auction recovery failed:`, err?.message ?? err);
         }
       }
     } catch (err) {
