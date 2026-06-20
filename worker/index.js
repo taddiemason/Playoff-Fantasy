@@ -16,6 +16,35 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const STATS_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh (shared raw NHL data)
 
+const NHL_TEAMS = ['ANA','BOS','BUF','CGY','CAR','CHI','COL','CBJ','DAL','DET','EDM','FLA','LAK','MIN','MTL','NSH','NJD','NYI','NYR','OTT','PHI','PIT','SJS','SEA','STL','TBL','TOR','UTA','VAN','VGK','WSH','WPG'];
+let nhlRosterCache = null;
+let nhlRosterCachedAt = 0;
+const NHL_ROSTER_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+async function getNhlRosterCache() {
+  const now = Date.now();
+  if (nhlRosterCache && (now - nhlRosterCachedAt) < NHL_ROSTER_TTL_MS) return nhlRosterCache;
+  const season = getCurrentSeason();
+  const rosters = await Promise.all(NHL_TEAMS.map(async (team) => {
+    try {
+      const res = await fetch(`${NHL_BASE}/roster/${team}/${season}`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return [...(data.forwards || []), ...(data.defensemen || []), ...(data.goalies || [])].map(p => ({
+        playerId: p.id,
+        name: `${p.firstName?.default ?? ''} ${p.lastName?.default ?? ''}`.trim(),
+        positionCode: p.positionCode || '',
+        teamAbbrev: team,
+        sweaterNumber: p.sweaterNumber || '',
+        headshot: normalizeHeadshotUrl(p.headshot),
+      }));
+    } catch { return []; }
+  }));
+  nhlRosterCache = rosters.flat();
+  nhlRosterCachedAt = now;
+  return nhlRosterCache;
+}
+
 // Standings state is keyed per league so leagues never clobber each other's
 // goalie pools or cached results. The key is the league id (or '__global__'
 // for the legacy single-pool standings endpoint).
@@ -2850,26 +2879,14 @@ async function handleApi(request, env, pathname) {
   }
 
   if (pathname === '/api/nhl/search' && request.method === 'GET') {
-    const searchParams = new URL(request.url).searchParams;
-    const q = searchParams.get('q') || '';
+    const q = new URL(request.url).searchParams.get('q') || '';
     if (!q.trim() || q.trim().length < 2) return json([]);
     try {
-      const searchUrl = `https://search.d3.nhle.com/api/v1/search?q=${encodeURIComponent(q.trim())}&type=player&culture=en-us&limit=20`;
-      const response = await fetch(searchUrl, {
-        headers: { 'User-Agent': 'PlayoffFantasy/1.0 (github.com/Zmalski/NHL-API-Reference)' }
-      });
-      if (!response.ok) throw new Error(`NHL search ${response.status}`);
-      const data = await response.json();
-      return json((data || []).map(p => ({
-        playerId: p.playerId,
-        name: p.name,
-        positionCode: p.positionCode || '',
-        teamAbbrev: p.teamAbbrev || '',
-        sweaterNumber: p.sweaterNumber || '',
-        headshot: normalizeHeadshotUrl(p.headshot),
-      })));
+      const allPlayers = await getNhlRosterCache();
+      const lower = q.trim().toLowerCase();
+      return json(allPlayers.filter(p => p.name.toLowerCase().includes(lower)).slice(0, 20));
     } catch {
-      // Fallback to DB search if NHL search API is unreachable
+      // Fallback to DB if roster fetch fails
       const { results } = await db
         .prepare(
           `SELECT DISTINCT player_id, player_name, nhl_team, position, position_detail, headshot_url
