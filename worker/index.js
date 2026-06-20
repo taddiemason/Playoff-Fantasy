@@ -1192,6 +1192,107 @@ async function handleApi(request, env, pathname) {
     return json({ players: players || [], myClaims });
   }
 
+  const waiverClaimMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers\/claim$/);
+  if (waiverClaimMatch && request.method === 'POST') {
+    const leagueId = parseId(waiverClaimMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { dropped_player_id, drop_player_id } = await request.json();
+    if (!dropped_player_id) return json({ error: 'dropped_player_id required' }, { status: 400 });
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+
+    const dp = await db.prepare('SELECT id, status, waiver_deadline FROM dropped_players WHERE id = ? AND league_id = ?')
+      .bind(dropped_player_id, leagueId).first();
+    if (!dp) return json({ error: 'Player not found' }, { status: 404 });
+    if (dp.status !== 'waivers') return json({ error: 'Player is not on waivers' }, { status: 400 });
+    if (dp.waiver_deadline && new Date(dp.waiver_deadline) <= new Date()) {
+      return json({ error: 'Waiver window has closed' }, { status: 400 });
+    }
+
+    const existing = await db.prepare(
+      `SELECT id FROM waiver_claims WHERE team_id = ? AND dropped_player_id = ? AND status = 'pending'`
+    ).bind(team.id, dropped_player_id).first();
+    if (existing) return json({ error: 'Already have a pending claim on this player' }, { status: 400 });
+
+    const member = await db.prepare('SELECT waiver_priority FROM league_members WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    const priority = member?.waiver_priority ?? 0;
+
+    const row = await db.prepare(`
+      INSERT INTO waiver_claims (league_id, team_id, dropped_player_id, drop_player_id, priority_at_time, status)
+      VALUES (?, ?, ?, ?, ?, 'pending') RETURNING id
+    `).bind(leagueId, team.id, dropped_player_id, drop_player_id ?? null, priority).first();
+
+    return json({ ok: true, claim_id: row.id });
+  }
+
+  const waiverClaimCancelMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers\/claim\/(\d+)$/);
+  if (waiverClaimCancelMatch && request.method === 'DELETE') {
+    const leagueId = parseId(waiverClaimCancelMatch[1]);
+    const claimId = parseId(waiverClaimCancelMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+
+    const claim = await db.prepare('SELECT id, status, team_id FROM waiver_claims WHERE id = ? AND league_id = ?')
+      .bind(claimId, leagueId).first();
+    if (!claim) return json({ error: 'Claim not found' }, { status: 404 });
+    if (claim.team_id !== team.id) return json({ error: 'Not your claim' }, { status: 403 });
+    if (claim.status !== 'pending') return json({ error: 'Claim already processed' }, { status: 400 });
+
+    await db.prepare(`UPDATE waiver_claims SET status = 'expired' WHERE id = ?`).bind(claimId).run();
+    return json({ ok: true });
+  }
+
+  const freeAgentPickupMatch = pathname.match(/^\/api\/leagues\/(\d+)\/free-agents\/(\d+)\/pickup$/);
+  if (freeAgentPickupMatch && request.method === 'POST') {
+    const leagueId = parseId(freeAgentPickupMatch[1]);
+    const droppedPlayerId = parseId(freeAgentPickupMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+
+    const dp = await db.prepare('SELECT * FROM dropped_players WHERE id = ? AND league_id = ?')
+      .bind(droppedPlayerId, leagueId).first();
+    if (!dp) return json({ error: 'Player not found' }, { status: 404 });
+    if (dp.status !== 'free_agent') return json({ error: 'Player is not a free agent' }, { status: 400 });
+
+    const meta = JSON.parse(dp.player_meta_json || '{}');
+
+    await db.batch([
+      db.prepare(`UPDATE dropped_players SET status = 'claimed' WHERE id = ?`).bind(droppedPlayerId),
+      db.prepare(`INSERT INTO team_players
+        (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url)
+        VALUES (?, ?, ?, ?, ?, '', ?, ?)`)
+        .bind(team.id, dp.player_id, dp.player_name, meta.nhl_team || '', meta.position || '',
+              meta.headshot_url || '', meta.crest_url || ''),
+    ]);
+
+    return json({ ok: true });
+  }
+
+  const waiverResetMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers\/reset-priorities$/);
+  if (waiverResetMatch && request.method === 'POST') {
+    const leagueId = parseId(waiverResetMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+      return json({ error: 'Commissioner only' }, { status: 403 });
+    }
+    await db.prepare('UPDATE league_members SET waiver_priority = 0 WHERE league_id = ?').bind(leagueId).run();
+    return json({ ok: true });
+  }
+
   // League-scoped teams
   const lgTeamsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams$/);
   if (lgTeamsMatch && request.method === 'GET') {
