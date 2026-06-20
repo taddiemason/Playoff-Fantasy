@@ -211,6 +211,30 @@ export const api = {
         return new WebSocket(`${proto}://${window.location.host}/api/leagues/${id}/auction/ws`);
       },
     },
+
+    season: {
+      end:              (id) => request(`/api/leagues/${id}/season/end`, { method: 'POST' }),
+      start:            (id) => request(`/api/leagues/${id}/season/start`, { method: 'POST' }),
+      activate:         (id) => request(`/api/leagues/${id}/season/activate`, { method: 'POST' }),
+      openKeeperWindow: (id) => request(`/api/leagues/${id}/season/keeper-window/open`, { method: 'POST' }),
+      closeKeeperWindow:(id) => request(`/api/leagues/${id}/season/keeper-window/close`, { method: 'POST' }),
+    },
+
+    keepers: {
+      get:    (id) => request(`/api/leagues/${id}/keepers`),
+      set:    (id, keepers) => request(`/api/leagues/${id}/keepers`, {
+        method: 'PUT', body: JSON.stringify({ keepers }),
+      }),
+      remove: (id, playerId) => request(`/api/leagues/${id}/keepers/${playerId}`, { method: 'DELETE' }),
+    },
+
+    taxi: {
+      set: (id, playerId, isTaxiSquad) => request(`/api/leagues/${id}/taxi`, {
+        method: 'PUT', body: JSON.stringify({ player_id: playerId, is_taxi_squad: isTaxiSquad }),
+      }),
+    },
+
+    rosterSnapshots: (id) => request(`/api/leagues/${id}/roster-snapshots`),
   },
 
   // Invite codes (public preview + join)

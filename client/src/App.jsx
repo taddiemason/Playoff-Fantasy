@@ -21,6 +21,7 @@ import WaiverWirePage from './pages/WaiverWirePage.jsx'
 import TradesPage from './pages/TradesPage.jsx'
 import DraftPage from './pages/DraftPage.jsx'
 import AuctionPage from './pages/AuctionPage.jsx'
+import KeepersPage from './pages/KeepersPage.jsx'
 import LeagueLayout from './components/LeagueLayout.jsx'
 import RequireAuth from './components/guards/RequireAuth.jsx'
 import { useAuth } from './auth/AuthContext.jsx'
@@ -60,6 +61,7 @@ export default function App() {
             <Route path="trades" element={<TradesPage />} />
             <Route path="draft" element={<DraftPage />} />
             <Route path="auction" element={<AuctionPage />} />
+            <Route path="keepers" element={<KeepersPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
