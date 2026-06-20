@@ -43,6 +43,11 @@ function getCurrentSeason() {
   return month >= 10 ? `${year}${year + 1}` : `${year - 1}${year}`;
 }
 
+function nextSeason(season) {
+  const s = parseInt(season.slice(0, 4), 10);
+  return `${s + 1}${s + 2}`;
+}
+
 const NHL_BASE = 'https://api-web.nhle.com/v1';
 
 const DEFAULT_HEADSHOT_PATH_PARTS = [
@@ -237,6 +242,10 @@ const DEFAULT_LEAGUE_CONFIG = {
   pick_timer_seconds: 90,
   auction_budget: 1000,
   bid_timer_seconds: 30,
+  max_keepers: 3,
+  keeper_cost_type: 'free',
+  keeper_cost_inflation_pct: 20,
+  taxi_squad_size: 3,
   lock: { lockedAt: null, rule: 'Before puck drop of Game 1' },
   payout: [
     { minEntries: 0, split: 'Winner takes all' },
@@ -268,6 +277,10 @@ function mergeConfig(stored) {
     pick_timer_seconds: parsed.pick_timer_seconds ?? d.pick_timer_seconds,
     auction_budget: parsed.auction_budget ?? d.auction_budget,
     bid_timer_seconds: parsed.bid_timer_seconds ?? d.bid_timer_seconds,
+    max_keepers: parsed.max_keepers ?? d.max_keepers,
+    keeper_cost_type: parsed.keeper_cost_type ?? d.keeper_cost_type,
+    keeper_cost_inflation_pct: parsed.keeper_cost_inflation_pct ?? d.keeper_cost_inflation_pct,
+    taxi_squad_size: parsed.taxi_squad_size ?? d.taxi_squad_size,
     lock: { ...d.lock, ...(parsed.lock) },
     payout: Array.isArray(parsed.payout) ? parsed.payout : d.payout,
     tiebreaker: { ...d.tiebreaker, ...(parsed.tiebreaker) },
@@ -341,6 +354,8 @@ function publicLeague(league, extra = {}) {
     season: league.season,
     season_type: league.season_type || 'playoffs',
     is_locked: !!league.is_locked,
+    league_format: league.league_format || 'redraft',
+    phase: league.phase || 'active',
     invite_code: league.invite_code,
     config: mergeConfig(league.config_json),
     created_at: league.created_at,
@@ -909,6 +924,11 @@ async function handleApi(request, env, pathname) {
     }
     if (body.is_locked !== undefined) {
       fields.push('is_locked = ?'); values.push(body.is_locked ? 1 : 0);
+    }
+    if (body.league_format !== undefined) {
+      if (!['redraft', 'keeper', 'dynasty'].includes(body.league_format))
+        return json({ error: 'Invalid league_format' }, { status: 400 });
+      fields.push('league_format = ?'); values.push(body.league_format);
     }
     if (!fields.length) return json({ error: 'Nothing to update' }, { status: 400 });
     const league = await db.prepare(`UPDATE leagues SET ${fields.join(', ')} WHERE id = ? RETURNING *`).bind(...values, leagueId).first();
