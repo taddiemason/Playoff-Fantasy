@@ -17,6 +17,8 @@ import JoinLeague from './pages/JoinLeague.jsx'
 import SchedulePage from './pages/SchedulePage.jsx'
 import LineupPage from './pages/LineupPage.jsx'
 import MatchupPage from './pages/MatchupPage.jsx'
+import WaiverWirePage from './pages/WaiverWirePage.jsx'
+import TradesPage from './pages/TradesPage.jsx'
 import LeagueLayout from './components/LeagueLayout.jsx'
 import RequireAuth from './components/guards/RequireAuth.jsx'
 import { useAuth } from './auth/AuthContext.jsx'
@@ -52,6 +54,8 @@ export default function App() {
             <Route path="schedule" element={<SchedulePage />} />
             <Route path="lineup" element={<LineupPage />} />
             <Route path="matchup" element={<MatchupPage />} />
+            <Route path="waivers" element={<WaiverWirePage />} />
+            <Route path="trades" element={<TradesPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

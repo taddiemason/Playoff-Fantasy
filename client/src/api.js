@@ -155,6 +155,30 @@ export const api = {
       byPeriod: (id, periodId) => request(`/api/leagues/${id}/matchups/${periodId}`),
       score:    (id) => request(`/api/leagues/${id}/matchups/score`, { method: 'POST' }),
     },
+
+    waivers: {
+      list:           (id) => request(`/api/leagues/${id}/waivers`),
+      drop:           (id, playerId) => request(`/api/leagues/${id}/players/${playerId}/drop`, { method: 'POST' }),
+      claim:          (id, droppedPlayerId, dropPlayerId) => request(`/api/leagues/${id}/waivers/claim`, {
+        method: 'POST', body: JSON.stringify({ dropped_player_id: droppedPlayerId, drop_player_id: dropPlayerId ?? null }),
+      }),
+      cancelClaim:    (id, claimId) => request(`/api/leagues/${id}/waivers/claim/${claimId}`, { method: 'DELETE' }),
+      pickup:         (id, droppedPlayerId) => request(`/api/leagues/${id}/free-agents/${droppedPlayerId}/pickup`, { method: 'POST' }),
+      resetPriorities:(id) => request(`/api/leagues/${id}/waivers/reset-priorities`, { method: 'POST' }),
+    },
+
+    trades: {
+      list:    (id) => request(`/api/leagues/${id}/trades`),
+      propose: (id, receivingTeamId, offering, requesting) => request(`/api/leagues/${id}/trades`, {
+        method: 'POST', body: JSON.stringify({ receiving_team_id: receivingTeamId, offering, requesting }),
+      }),
+      accept:  (id, tradeId) => request(`/api/leagues/${id}/trades/${tradeId}/accept`, { method: 'PUT' }),
+      reject:  (id, tradeId) => request(`/api/leagues/${id}/trades/${tradeId}/reject`, { method: 'PUT' }),
+      counter: (id, tradeId, offering, requesting) => request(`/api/leagues/${id}/trades/${tradeId}/counter`, {
+        method: 'PUT', body: JSON.stringify({ offering, requesting }),
+      }),
+      veto:    (id, tradeId) => request(`/api/leagues/${id}/trades/${tradeId}/veto`, { method: 'PUT' }),
+    },
   },
 
   // Invite codes (public preview + join)
