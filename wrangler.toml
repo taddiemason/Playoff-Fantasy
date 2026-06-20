@@ -26,6 +26,14 @@ crons = ["0 * * * *"]
 name = "DRAFT_ROOM"
 class_name = "DraftRoom"
 
+[[durable_objects.bindings]]
+name = "AUCTION_ROOM"
+class_name = "AuctionRoom"
+
 [[migrations]]
 tag = "v1"
 new_classes = ["DraftRoom"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["AuctionRoom"]

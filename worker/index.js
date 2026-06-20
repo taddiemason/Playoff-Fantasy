@@ -234,6 +234,8 @@ const DEFAULT_LEAGUE_CONFIG = {
   lineup_lock_hour_utc: 23,
   trade_veto_hours: 24,
   pick_timer_seconds: 90,
+  auction_budget: 1000,
+  bid_timer_seconds: 30,
   lock: { lockedAt: null, rule: 'Before puck drop of Game 1' },
   payout: [
     { minEntries: 0, split: 'Winner takes all' },
@@ -263,6 +265,8 @@ function mergeConfig(stored) {
     lineup_lock_hour_utc: parsed.lineup_lock_hour_utc ?? d.lineup_lock_hour_utc,
     trade_veto_hours: parsed.trade_veto_hours ?? d.trade_veto_hours,
     pick_timer_seconds: parsed.pick_timer_seconds ?? d.pick_timer_seconds,
+    auction_budget: parsed.auction_budget ?? d.auction_budget,
+    bid_timer_seconds: parsed.bid_timer_seconds ?? d.bid_timer_seconds,
     lock: { ...d.lock, ...(parsed.lock) },
     payout: Array.isArray(parsed.payout) ? parsed.payout : d.payout,
     tiebreaker: { ...d.tiebreaker, ...(parsed.tiebreaker) },
