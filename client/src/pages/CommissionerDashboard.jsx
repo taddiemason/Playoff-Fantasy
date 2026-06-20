@@ -53,6 +53,15 @@ export default function CommissionerDashboard() {
   const [auctionBudget, setAuctionBudget] = useState(() => league.config?.auction_budget ?? 1000)
   const [bidTimer, setBidTimer] = useState(() => league.config?.bid_timer_seconds ?? 30)
 
+  // Season management
+  const [leagueFormat, setLeagueFormat] = useState(() => league?.league_format ?? 'redraft')
+  const [maxKeepers, setMaxKeepers] = useState(() => league?.config?.max_keepers ?? 3)
+  const [keeperCostType, setKeeperCostType] = useState(() => league?.config?.keeper_cost_type ?? 'free')
+  const [keeperInflationPct, setKeeperInflationPct] = useState(() => league?.config?.keeper_cost_inflation_pct ?? 20)
+  const [taxiSquadSize, setTaxiSquadSize] = useState(() => league?.config?.taxi_squad_size ?? 3)
+  const [seasonMsg, setSeasonMsg] = useState('')
+  const [keeperReadiness, setKeeperReadiness] = useState(null)
+
   const loadMembers = useCallback(() => {
     api.leagues.getMembers(leagueId).then(setMembers).catch((e) => setError(e.message))
   }, [leagueId])
@@ -77,6 +86,12 @@ export default function CommissionerDashboard() {
       if (data?.session) setAuctionSession(data.session);
     }).catch(() => {});
   }, [leagueId])
+
+  useEffect(() => {
+    if (league?.phase === 'keeper_window') {
+      api.leagues.keepers.get(leagueId).then(d => setKeeperReadiness(d)).catch(() => {});
+    }
+  }, [leagueId, league?.phase])
 
   if (!isCommissioner) {
     return (
@@ -223,6 +238,66 @@ export default function CommissionerDashboard() {
       });
       setAuctionMsg('Auction settings saved.');
     } catch (e) { setAuctionMsg(e.message); }
+  }
+
+  async function saveSeasonSettings() {
+    setSeasonMsg('');
+    try {
+      await api.leagues.update(leagueId, {
+        league_format: leagueFormat,
+        config: {
+          max_keepers: parseInt(maxKeepers),
+          keeper_cost_type: keeperCostType,
+          keeper_cost_inflation_pct: parseInt(keeperInflationPct),
+          taxi_squad_size: parseInt(taxiSquadSize),
+        },
+      });
+      await refreshLeague();
+      setSeasonMsg('Settings saved.');
+    } catch (e) { setSeasonMsg(e.message); }
+  }
+
+  async function endSeason() {
+    if (!window.confirm('End the current season? This will snapshot all rosters.')) return;
+    try {
+      await api.leagues.season.end(leagueId);
+      await refreshLeague();
+      setSeasonMsg('Season ended.');
+    } catch (e) { setSeasonMsg(e.message); }
+  }
+
+  async function openKeeperWindow() {
+    try {
+      await api.leagues.season.openKeeperWindow(leagueId);
+      await refreshLeague();
+      setSeasonMsg('Keeper window opened.');
+    } catch (e) { setSeasonMsg(e.message); }
+  }
+
+  async function closeKeeperWindow() {
+    if (!window.confirm('Close the keeper window? Non-keepers will be removed from all rosters.')) return;
+    try {
+      const data = await api.leagues.season.closeKeeperWindow(leagueId);
+      await refreshLeague();
+      setSeasonMsg(`Keeper window closed. Season advanced to ${data.nextSeason}.`);
+    } catch (e) { setSeasonMsg(e.message); }
+  }
+
+  async function startNewSeason() {
+    if (!window.confirm('Start a new season? This will advance the season string.')) return;
+    try {
+      const data = await api.leagues.season.start(leagueId);
+      await refreshLeague();
+      setSeasonMsg(`New season started (${data.nextSeason}). Phase: ${data.phase}.`);
+    } catch (e) { setSeasonMsg(e.message); }
+  }
+
+  async function activateSeason() {
+    try {
+      await api.leagues.season.activate(leagueId);
+      await refreshLeague();
+      setSeasonMsg('Season activated!');
+    } catch (e) { setSeasonMsg(e.message); }
   }
 
   return (
@@ -474,6 +549,108 @@ export default function CommissionerDashboard() {
         )}
 
         {auctionMsg && <p style={{ color: '#e67e22', marginTop: '0.5rem' }}>{auctionMsg}</p>}
+      </div>
+
+      {/* ── Season Management ── */}
+      <div className="card" style={{ marginTop: '1.5rem' }}>
+        <h3 style={{ marginTop: 0 }}>Season Management</h3>
+
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '1rem', alignItems: 'flex-end' }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: '0.8rem', color: '#888' }}>League Format</span>
+            <select value={leagueFormat} onChange={e => setLeagueFormat(e.target.value)}>
+              <option value="redraft">Redraft</option>
+              <option value="keeper">Keeper</option>
+              <option value="dynasty">Dynasty</option>
+            </select>
+          </label>
+
+          {leagueFormat === 'keeper' && (
+            <>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: '0.8rem', color: '#888' }}>Max Keepers</span>
+                <input type="number" min={1} max={18} value={maxKeepers} onChange={e => setMaxKeepers(e.target.value)} style={{ width: 70 }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontSize: '0.8rem', color: '#888' }}>Keeper Cost</span>
+                <select value={keeperCostType} onChange={e => setKeeperCostType(e.target.value)}>
+                  <option value="free">Free</option>
+                  <option value="pick_round">Draft Round</option>
+                  <option value="auction_inflation">Auction Inflation %</option>
+                  <option value="none">Manual (no enforcement)</option>
+                </select>
+              </label>
+              {keeperCostType === 'auction_inflation' && (
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ fontSize: '0.8rem', color: '#888' }}>Inflation %</span>
+                  <input type="number" min={0} max={200} value={keeperInflationPct} onChange={e => setKeeperInflationPct(e.target.value)} style={{ width: 70 }} />
+                </label>
+              )}
+            </>
+          )}
+
+          {leagueFormat === 'dynasty' && (
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={{ fontSize: '0.8rem', color: '#888' }}>Taxi Squad Size</span>
+              <input type="number" min={0} max={10} value={taxiSquadSize} onChange={e => setTaxiSquadSize(e.target.value)} style={{ width: 70 }} />
+            </label>
+          )}
+
+          <button onClick={saveSeasonSettings}>Save Settings</button>
+        </div>
+
+        <div style={{ borderTop: '1px solid #333', paddingTop: '1rem' }}>
+          <div style={{ fontSize: '0.8rem', color: '#888', marginBottom: '0.5rem' }}>
+            Current phase: <strong>{league?.phase ?? 'active'}</strong> · Season: <strong>{league?.season}</strong>
+          </div>
+
+          {league?.phase === 'active' && (
+            <button onClick={endSeason} style={{ background: '#c0392b', border: 'none', color: '#fff', padding: '6px 14px', borderRadius: 4, cursor: 'pointer' }}>
+              End Season
+            </button>
+          )}
+
+          {league?.phase === 'offseason' && league?.league_format === 'keeper' && (
+            <button onClick={openKeeperWindow}>Open Keeper Window</button>
+          )}
+
+          {league?.phase === 'keeper_window' && (
+            <div>
+              {keeperReadiness && (
+                <div style={{ marginBottom: '0.75rem' }}>
+                  {keeperReadiness.teams.map(t => (
+                    <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', padding: '3px 0', borderBottom: '1px solid #222' }}>
+                      <span>{t.name}</span>
+                      <span style={{ color: t.designationCount === keeperReadiness.config.maxKeepers ? '#27ae60' : '#888' }}>
+                        {t.designationCount} / {keeperReadiness.config.maxKeepers}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button onClick={closeKeeperWindow}>Close Keeper Window</button>
+            </div>
+          )}
+
+          {league?.phase === 'offseason' && league?.league_format !== 'keeper' && (
+            <button onClick={startNewSeason}>Start New Season</button>
+          )}
+
+          {league?.phase === 'supplemental_draft' && (
+            <p style={{ color: '#888', fontSize: '0.85rem' }}>
+              Supplemental draft in progress —{' '}
+              <a href={`/leagues/${leagueId}/draft`} style={{ color: '#3498db' }}>Go to Draft Room</a>{' '}
+              or{' '}
+              <a href={`/leagues/${leagueId}/auction`} style={{ color: '#3498db' }}>Go to Auction Room</a>
+            </p>
+          )}
+
+          {league?.phase === 'pre_draft' && (
+            <button onClick={activateSeason}>Activate Season</button>
+          )}
+        </div>
+
+        {seasonMsg && <p style={{ color: '#e67e22', marginTop: '0.5rem', fontSize: '0.85rem' }}>{seasonMsg}</p>}
       </div>
 
       {/* ── Members ── */}
