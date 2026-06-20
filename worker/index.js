@@ -1293,6 +1293,178 @@ async function handleApi(request, env, pathname) {
     return json({ ok: true });
   }
 
+  // ── Trades ────────────────────────────────────────────────────────────────
+  const tradesListMatch = pathname.match(/^\/api\/leagues\/(\d+)\/trades$/);
+  if (tradesListMatch && request.method === 'GET') {
+    const leagueId = parseId(tradesListMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { results: trades } = await db.prepare(`
+      SELECT tp.*, t1.name AS proposing_team_name, t2.name AS receiving_team_name
+      FROM trade_proposals tp
+      JOIN teams t1 ON t1.id = tp.proposing_team_id
+      JOIN teams t2 ON t2.id = tp.receiving_team_id
+      WHERE tp.league_id = ?
+      ORDER BY tp.created_at DESC
+    `).bind(leagueId).all();
+
+    const result = await Promise.all((trades || []).map(async (t) => {
+      const { results: items } = await db.prepare('SELECT * FROM trade_items WHERE trade_id = ?').bind(t.id).all();
+      return { ...t, items: items || [] };
+    }));
+
+    return json({ trades: result });
+  }
+
+  if (tradesListMatch && request.method === 'POST') {
+    const leagueId = parseId(tradesListMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { receiving_team_id, offering, requesting } = await request.json();
+    if (!receiving_team_id || !Array.isArray(offering) || !Array.isArray(requesting)
+        || offering.length === 0 || requesting.length === 0) {
+      return json({ error: 'receiving_team_id, offering (non-empty), and requesting (non-empty) required' }, { status: 400 });
+    }
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!myTeam) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (myTeam.id === receiving_team_id) return json({ error: 'Cannot trade with yourself' }, { status: 400 });
+
+    const receivingTeam = await db.prepare('SELECT id FROM teams WHERE id = ? AND league_id = ?')
+      .bind(receiving_team_id, leagueId).first();
+    if (!receivingTeam) return json({ error: 'Receiving team not found' }, { status: 404 });
+
+    for (const pid of offering) {
+      const p = await db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(myTeam.id, pid).first();
+      if (!p) return json({ error: `Player ${pid} not on your team` }, { status: 400 });
+    }
+    for (const pid of requesting) {
+      const p = await db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(receiving_team_id, pid).first();
+      if (!p) return json({ error: `Player ${pid} not on receiving team` }, { status: 400 });
+    }
+
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    const trade = await db.prepare(`
+      INSERT INTO trade_proposals (league_id, proposing_team_id, receiving_team_id, status, expires_at)
+      VALUES (?, ?, ?, 'pending', ?) RETURNING id
+    `).bind(leagueId, myTeam.id, receiving_team_id, expiresAt).first();
+
+    const offeringRows = await Promise.all(offering.map(pid =>
+      db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(myTeam.id, pid).first()
+    ));
+    const requestingRows = await Promise.all(requesting.map(pid =>
+      db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(receiving_team_id, pid).first()
+    ));
+
+    await db.batch([
+      ...offeringRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+        .bind(trade.id, myTeam.id, p.player_id, p.player_name)),
+      ...requestingRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+        .bind(trade.id, receiving_team_id, p.player_id, p.player_name)),
+    ]);
+
+    return json({ ok: true, trade_id: trade.id });
+  }
+
+  const tradeActionMatch = pathname.match(/^\/api\/leagues\/(\d+)\/trades\/(\d+)\/(accept|reject|counter|veto)$/);
+  if (tradeActionMatch && request.method === 'PUT') {
+    const leagueId = parseId(tradeActionMatch[1]);
+    const tradeId = parseId(tradeActionMatch[2]);
+    const action = tradeActionMatch[3];
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const trade = await db.prepare('SELECT * FROM trade_proposals WHERE id = ? AND league_id = ?')
+      .bind(tradeId, leagueId).first();
+    if (!trade) return json({ error: 'Trade not found' }, { status: 404 });
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+
+    if (action === 'accept' || action === 'reject' || action === 'counter') {
+      if (!myTeam || myTeam.id !== trade.receiving_team_id) {
+        return json({ error: 'Only the receiving team can respond to this trade' }, { status: 403 });
+      }
+      if (trade.status !== 'pending') {
+        return json({ error: 'Trade is no longer pending' }, { status: 400 });
+      }
+
+      if (action === 'accept') {
+        const config = mergeConfig(ctx.league.config_json);
+        const vetoDeadline = new Date(Date.now() + (config.trade_veto_hours ?? 24) * 60 * 60 * 1000).toISOString();
+        await db.prepare(`UPDATE trade_proposals SET status = 'accepted', veto_deadline = ? WHERE id = ?`)
+          .bind(vetoDeadline, tradeId).run();
+        return json({ ok: true, veto_deadline: vetoDeadline });
+      }
+
+      if (action === 'reject') {
+        await db.prepare(`UPDATE trade_proposals SET status = 'rejected' WHERE id = ?`).bind(tradeId).run();
+        return json({ ok: true });
+      }
+
+      if (action === 'counter') {
+        const { offering, requesting } = await request.json();
+        if (!Array.isArray(offering) || !Array.isArray(requesting) || offering.length === 0 || requesting.length === 0) {
+          return json({ error: 'offering and requesting arrays required' }, { status: 400 });
+        }
+        for (const pid of offering) {
+          const p = await db.prepare('SELECT player_id FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(myTeam.id, pid).first();
+          if (!p) return json({ error: `Player ${pid} not on your team` }, { status: 400 });
+        }
+        for (const pid of requesting) {
+          const p = await db.prepare('SELECT player_id FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(trade.proposing_team_id, pid).first();
+          if (!p) return json({ error: `Player ${pid} not on opposing team` }, { status: 400 });
+        }
+
+        const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+        await db.prepare(`UPDATE trade_proposals SET status = 'countered' WHERE id = ?`).bind(tradeId).run();
+
+        const counter = await db.prepare(`
+          INSERT INTO trade_proposals (league_id, proposing_team_id, receiving_team_id, status, expires_at)
+          VALUES (?, ?, ?, 'pending', ?) RETURNING id
+        `).bind(leagueId, myTeam.id, trade.proposing_team_id, expiresAt).first();
+
+        const offeringRows = await Promise.all(offering.map(pid =>
+          db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(myTeam.id, pid).first()
+        ));
+        const requestingRows = await Promise.all(requesting.map(pid =>
+          db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(trade.proposing_team_id, pid).first()
+        ));
+
+        await db.batch([
+          ...offeringRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+            .bind(counter.id, myTeam.id, p.player_id, p.player_name)),
+          ...requestingRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+            .bind(counter.id, trade.proposing_team_id, p.player_id, p.player_name)),
+        ]);
+
+        return json({ ok: true, counter_trade_id: counter.id });
+      }
+    }
+
+    if (action === 'veto') {
+      if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+        return json({ error: 'Commissioner only' }, { status: 403 });
+      }
+      if (trade.status !== 'accepted') {
+        return json({ error: 'Can only veto accepted trades' }, { status: 400 });
+      }
+      await db.prepare(`UPDATE trade_proposals SET status = 'vetoed' WHERE id = ?`).bind(tradeId).run();
+      return json({ ok: true });
+    }
+  }
+
   // League-scoped teams
   const lgTeamsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams$/);
   if (lgTeamsMatch && request.method === 'GET') {
