@@ -1136,6 +1136,255 @@ async function handleApi(request, env, pathname) {
     return json({ scored });
   }
 
+  // ── Draft ────────────────────────────────────────────────────────────────
+
+  const draftSessionMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session$/);
+
+  if (draftSessionMatch && request.method === 'POST') {
+    const leagueId = parseId(draftSessionMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const existing = await db.prepare('SELECT id, status FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (existing && existing.status !== 'pending') {
+      return json({ error: 'A draft session already exists and cannot be reset' }, { status: 400 });
+    }
+    if (existing) {
+      await db.prepare('UPDATE draft_sessions SET draft_order_json = ?, current_pick = 0, total_picks = 0, pick_deadline = NULL WHERE id = ?')
+        .bind('[]', existing.id).run();
+      return json({ id: existing.id });
+    }
+    const session = await db.prepare('INSERT INTO draft_sessions (league_id) VALUES (?) RETURNING id').bind(leagueId).first();
+    return json({ id: session.id });
+  }
+
+  if (draftSessionMatch && request.method === 'GET') {
+    const leagueId = parseId(draftSessionMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const session = await db.prepare('SELECT * FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ session: null, picks: [], myQueue: [] });
+
+    const { results: picks } = await db.prepare(`
+      SELECT dp.*, t.name AS team_name FROM draft_picks dp
+      JOIN teams t ON t.id = dp.team_id
+      WHERE dp.draft_session_id = ? ORDER BY dp.overall_pick
+    `).bind(session.id).all();
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?').bind(leagueId, ctx.user.id).first();
+    const myQueue = myTeam
+      ? (await db.prepare('SELECT * FROM draft_queues WHERE draft_session_id = ? AND team_id = ? ORDER BY rank_order').bind(session.id, myTeam.id).all()).results || []
+      : [];
+
+    const draftOrder = JSON.parse(session.draft_order_json || '[]');
+    let teamNames = {};
+    if (draftOrder.length > 0) {
+      const ph = draftOrder.map(() => '?').join(',');
+      const { results: tms } = await db.prepare(`SELECT id, name FROM teams WHERE id IN (${ph})`).bind(...draftOrder).all();
+      teamNames = Object.fromEntries((tms || []).map(t => [t.id, t.name]));
+    }
+
+    return json({
+      session: { ...session, draft_order: draftOrder.map(id => ({ teamId: id, teamName: teamNames[id] || '' })) },
+      picks: (picks || []).map(p => ({ ...p, player_meta: JSON.parse(p.player_meta_json || '{}') })),
+      myQueue: myQueue.map(q => ({ ...q, player_meta: JSON.parse(q.player_meta_json || '{}') })),
+    });
+  }
+
+  const draftOrderMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/order$/);
+  if (draftOrderMatch && request.method === 'PUT') {
+    const leagueId = parseId(draftOrderMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const { order } = await request.json();
+    if (!Array.isArray(order) || order.length === 0) return json({ error: 'order must be a non-empty array of teamIds' }, { status: 400 });
+
+    const { results: teams } = await db.prepare('SELECT id FROM teams WHERE league_id = ?').bind(leagueId).all();
+    const validIds = new Set((teams || []).map(t => t.id));
+    if (!order.every(id => validIds.has(id))) return json({ error: 'Invalid team ID in order' }, { status: 400 });
+
+    const session = await db.prepare('SELECT id, status FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No draft session found' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Draft already started' }, { status: 400 });
+
+    await db.prepare('UPDATE draft_sessions SET draft_order_json = ? WHERE id = ?').bind(JSON.stringify(order), session.id).run();
+    return json({ ok: true });
+  }
+
+  const draftRandomizeMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/randomize$/);
+  if (draftRandomizeMatch && request.method === 'POST') {
+    const leagueId = parseId(draftRandomizeMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const session = await db.prepare('SELECT id, status FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No draft session found' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Draft already started' }, { status: 400 });
+
+    const { results: teams } = await db.prepare('SELECT id FROM teams WHERE league_id = ?').bind(leagueId).all();
+    const order = (teams || []).map(t => t.id).sort(() => Math.random() - 0.5);
+    await db.prepare('UPDATE draft_sessions SET draft_order_json = ? WHERE id = ?').bind(JSON.stringify(order), session.id).run();
+    return json({ order });
+  }
+
+  const draftStartMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/start$/);
+  if (draftStartMatch && request.method === 'POST') {
+    const leagueId = parseId(draftStartMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const session = await db.prepare('SELECT * FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No draft session found' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Draft already started' }, { status: 400 });
+
+    const draftOrder = JSON.parse(session.draft_order_json || '[]');
+    if (draftOrder.length === 0) return json({ error: 'Draft order not set' }, { status: 400 });
+
+    const config = mergeConfig(ctx.league.config_json);
+    const rounds = config.roster.maxF + config.roster.maxD + config.roster.maxG;
+    const totalPicks = rounds * draftOrder.length;
+    const timerSeconds = config.pick_timer_seconds;
+    const pickDeadline = new Date(Date.now() + timerSeconds * 1000).toISOString();
+
+    // Seed rankings from NHL API — best effort, non-blocking on failure
+    const rankInserts = [];
+    let globalRank = 1;
+    try {
+      const skaterRes = await fetch(`${NHL_BASE}/skater-stats-leaders/current?categories=points&limit=200`, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0' },
+      });
+      if (skaterRes.ok) {
+        const skaterData = await skaterRes.json();
+        // The API returns the top players under a key matching the category name
+        const skaters = skaterData.skaterPoints || skaterData.data || [];
+        for (const s of skaters) {
+          const posCode = s.positionCode || '';
+          const position = posCode === 'D' ? 'D' : 'F';
+          const name = s.name?.default || `${s.firstName?.default || ''} ${s.lastName?.default || ''}`.trim();
+          const meta = JSON.stringify({
+            position, nhl_team: s.teamAbbrevs || '',
+            headshot_url: normalizeHeadshotUrl(s.headshot), crest_url: '',
+          });
+          rankInserts.push(db.prepare(`
+            INSERT OR IGNORE INTO draft_player_rankings (draft_session_id, player_id, player_name, player_meta_json, global_rank)
+            VALUES (?, ?, ?, ?, ?)
+          `).bind(session.id, s.id || s.playerId, name, meta, globalRank++));
+        }
+      }
+      const goalieRes = await fetch(`${NHL_BASE}/goalie-stats-leaders/current?categories=wins&limit=30`, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0' },
+      });
+      if (goalieRes.ok) {
+        const goalieData = await goalieRes.json();
+        const goalies = goalieData.goalieWins || goalieData.data || [];
+        for (const g of goalies) {
+          const name = g.name?.default || `${g.firstName?.default || ''} ${g.lastName?.default || ''}`.trim();
+          const meta = JSON.stringify({
+            position: 'G', nhl_team: g.teamAbbrevs || '',
+            headshot_url: normalizeHeadshotUrl(g.headshot), crest_url: '',
+          });
+          rankInserts.push(db.prepare(`
+            INSERT OR IGNORE INTO draft_player_rankings (draft_session_id, player_id, player_name, player_meta_json, global_rank)
+            VALUES (?, ?, ?, ?, ?)
+          `).bind(session.id, g.id || g.playerId, name, meta, globalRank++));
+        }
+      }
+    } catch (e) {
+      console.error('[draft] rankings seed failed, continuing:', e?.message);
+    }
+
+    // D1 batch limit is 100 statements — chunk if needed
+    for (let i = 0; i < rankInserts.length; i += 100) {
+      await db.batch(rankInserts.slice(i, i + 100));
+    }
+
+    await db.prepare(`
+      UPDATE draft_sessions SET status = 'active', started_at = ?, total_picks = ?, pick_deadline = ? WHERE id = ?
+    `).bind(new Date().toISOString(), totalPicks, pickDeadline, session.id).run();
+
+    // Trigger the DO alarm
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+    await stub.fetch(new Request('https://internal/alarm-reset', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    })).catch(e => console.error('[draft] DO alarm trigger failed:', e?.message));
+
+    return json({ ok: true, totalPicks, pickDeadline });
+  }
+
+  const draftWsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/ws$/);
+  if (draftWsMatch && request.method === 'GET') {
+    const leagueId = parseId(draftWsMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?').bind(leagueId, ctx.user.id).first();
+    const isComm = isCommissioner(ctx.league, ctx.role, ctx.user.id);
+
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+
+    const proxiedReq = new Request(request.url, {
+      method: request.method,
+      headers: new Headers({
+        ...Object.fromEntries(request.headers),
+        'X-League-Id': String(leagueId),
+        'X-User-Id': String(ctx.user.id),
+        'X-Team-Id': String(myTeam?.id || ''),
+        'X-Is-Commissioner': String(isComm),
+      }),
+    });
+
+    return stub.fetch(proxiedReq);
+  }
+
+  const draftPauseMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/pause$/);
+  if (draftPauseMatch && request.method === 'POST') {
+    const leagueId = parseId(draftPauseMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    await db.prepare("UPDATE draft_sessions SET status = 'paused' WHERE league_id = ?").bind(leagueId).run();
+
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+    await stub.fetch(new Request('https://internal/pause', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    })).catch(console.error);
+
+    return json({ ok: true });
+  }
+
+  const draftResumeMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/resume$/);
+  if (draftResumeMatch && request.method === 'POST') {
+    const leagueId = parseId(draftResumeMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const config = mergeConfig(ctx.league.config_json);
+    const pickDeadline = new Date(Date.now() + config.pick_timer_seconds * 1000).toISOString();
+    await db.prepare("UPDATE draft_sessions SET status = 'active', pick_deadline = ? WHERE league_id = ?").bind(pickDeadline, leagueId).run();
+
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+    await stub.fetch(new Request('https://internal/alarm-reset', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    })).catch(console.error);
+
+    return json({ ok: true, pickDeadline });
+  }
+
   // ── Waivers ───────────────────────────────────────────────────────────────
   const dropPlayerMatch = pathname.match(/^\/api\/leagues\/(\d+)\/players\/(\d+)\/drop$/);
   if (dropPlayerMatch && request.method === 'POST') {
@@ -2556,6 +2805,23 @@ export default {
           await executeTrades(db, league.id);
         } catch (err) {
           console.error(`[cron] league ${league.id} trade execution failed:`, err?.message ?? err);
+        }
+        try {
+          const stalledDraft = await db.prepare(`
+            SELECT id FROM draft_sessions
+            WHERE status = 'active' AND league_id = ?
+              AND pick_deadline < datetime('now', '-2 minutes')
+          `).bind(league.id).first();
+          if (stalledDraft) {
+            const doId = env.DRAFT_ROOM.idFromName(`league-${league.id}`);
+            const stub = env.DRAFT_ROOM.get(doId);
+            await stub.fetch(new Request('https://internal/alarm-reset', {
+              method: 'POST',
+              headers: { 'X-League-Id': String(league.id) },
+            }));
+          }
+        } catch (err) {
+          console.error(`[cron] league ${league.id} stalled draft recovery failed:`, err?.message ?? err);
         }
       }
     } catch (err) {
