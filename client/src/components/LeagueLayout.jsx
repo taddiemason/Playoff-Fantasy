@@ -9,6 +9,12 @@ function LeagueNav({ leagueId, isCommissioner }) {
     <div className="league-nav">
       <NavLink end to={`/leagues/${leagueId}`} className={tab}>Home</NavLink>
       <NavLink to={`/leagues/${leagueId}/standings`} className={tab}>Standings</NavLink>
+      <NavLink to={`/leagues/${leagueId}/matchup`} className={tab}>Matchup</NavLink>
+      <NavLink to={`/leagues/${leagueId}/lineup`} className={tab}>Lineup</NavLink>
+      <NavLink to={`/leagues/${leagueId}/schedule`} className={tab}>Schedule</NavLink>
+      <NavLink to={`/leagues/${leagueId}/waivers`} className={tab}>Waivers</NavLink>
+      <NavLink to={`/leagues/${leagueId}/trades`} className={tab}>Trades</NavLink>
+      <NavLink to={`/leagues/${leagueId}/draft`} className={tab}>Draft</NavLink>
       <NavLink to={`/leagues/${leagueId}/rules`} className={tab}>Rules</NavLink>
       <NavLink to={`/leagues/${leagueId}/players`} className={tab}>Players</NavLink>
       <NavLink to={`/leagues/${leagueId}/add-players`} className={tab}>Add Players</NavLink>

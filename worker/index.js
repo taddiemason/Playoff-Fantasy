@@ -9,6 +9,8 @@ import {
   parseCookies,
 } from './auth.js';
 
+export { DraftRoom } from './draft-room.js';
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const STATS_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const nhlCache = new Map(); // keyed by player-{id}, cleared on refresh (shared raw NHL data)
@@ -228,6 +230,10 @@ const DEFAULT_LEAGUE_CONFIG = {
     goalie: { win: 2, shutout: 3, gaaRank: true, svpRank: true },
   },
   roster: { maxF: 10, maxD: 5, maxG: 3, maxSameTeamF: 3, maxSameTeamD: 2 },
+  active_slots: { F: 6, D: 3, G: 2 },
+  lineup_lock_hour_utc: 23,
+  trade_veto_hours: 24,
+  pick_timer_seconds: 90,
   lock: { lockedAt: null, rule: 'Before puck drop of Game 1' },
   payout: [
     { minEntries: 0, split: 'Winner takes all' },
@@ -253,6 +259,10 @@ function mergeConfig(stored) {
       goalie: { ...d.scoring.goalie, ...(parsed.scoring?.goalie) },
     },
     roster: { ...d.roster, ...(parsed.roster) },
+    active_slots: { ...d.active_slots, ...(parsed.active_slots) },
+    lineup_lock_hour_utc: parsed.lineup_lock_hour_utc ?? d.lineup_lock_hour_utc,
+    trade_veto_hours: parsed.trade_veto_hours ?? d.trade_veto_hours,
+    pick_timer_seconds: parsed.pick_timer_seconds ?? d.pick_timer_seconds,
     lock: { ...d.lock, ...(parsed.lock) },
     payout: Array.isArray(parsed.payout) ? parsed.payout : d.payout,
     tiebreaker: { ...d.tiebreaker, ...(parsed.tiebreaker) },
@@ -459,6 +469,165 @@ function isSnapshotFresh(fetchedAt, ttlMs = STATS_SNAPSHOT_TTL_MS) {
   if (!fetchedAt) return false;
   const ts = new Date(fetchedAt).getTime();
   return Number.isFinite(ts) && (Date.now() - ts) < ttlMs;
+}
+
+// ── Schedule & matchup helpers ──────────────────────────────────────────────
+
+function getActiveSlots(config) {
+  return { F: config.active_slots?.F ?? 6, D: config.active_slots?.D ?? 3, G: config.active_slots?.G ?? 2 };
+}
+
+function generateRoundRobin(teams, startDate, numWeeks, lockHourUtc = 23) {
+  const slots = [...teams];
+  if (slots.length % 2 !== 0) slots.push(null); // null = bye
+  const n = slots.length;
+  const periods = [];
+  const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+  const base = new Date(startDate + 'T00:00:00Z');
+
+  for (let week = 0; week < numWeeks; week++) {
+    const periodStart = new Date(base.getTime() + week * msPerWeek);
+    const periodEnd = new Date(base.getTime() + (week + 1) * msPerWeek - 1);
+    const lockDate = new Date(periodStart);
+    lockDate.setUTCHours(lockHourUtc, 0, 0, 0);
+
+    const pairings = [];
+    for (let i = 0; i < n / 2; i++) {
+      const home = slots[i];
+      const away = slots[n - 1 - i];
+      if (home !== null && away !== null) {
+        pairings.push({ home_team_id: home.id, away_team_id: away.id });
+      }
+    }
+
+    periods.push({
+      period_num: week + 1,
+      start_date: periodStart.toISOString().slice(0, 10),
+      end_date: periodEnd.toISOString().slice(0, 10),
+      lock_time: lockDate.toISOString(),
+      matchups: pairings,
+    });
+
+    // Rotate: keep slots[0] fixed, rotate slots[1..]
+    const last = slots[n - 1];
+    for (let i = n - 1; i > 1; i--) slots[i] = slots[i - 1];
+    slots[1] = last;
+  }
+
+  return periods;
+}
+
+async function getTeamRecords(db, leagueId) {
+  const { results } = await db.prepare(`
+    SELECT team_id,
+      SUM(CASE WHEN result = 'W' THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN result = 'L' THEN 1 ELSE 0 END) AS losses,
+      SUM(CASE WHEN result = 'T' THEN 1 ELSE 0 END) AS ties
+    FROM (
+      SELECT home_team_id AS team_id,
+        CASE
+          WHEN home_score > away_score THEN 'W'
+          WHEN home_score < away_score THEN 'L'
+          ELSE 'T'
+        END AS result
+      FROM matchups
+      WHERE league_id = ? AND (winner_team_id IS NOT NULL OR home_score > 0 OR away_score > 0)
+      UNION ALL
+      SELECT away_team_id,
+        CASE
+          WHEN away_score > home_score THEN 'W'
+          WHEN away_score < home_score THEN 'L'
+          ELSE 'T'
+        END AS result
+      FROM matchups
+      WHERE league_id = ? AND (winner_team_id IS NOT NULL OR home_score > 0 OR away_score > 0)
+    ) sub
+    GROUP BY team_id
+  `).bind(leagueId, leagueId).all();
+
+  const map = new Map();
+  for (const row of (results || [])) {
+    map.set(row.team_id, { wins: row.wins ?? 0, losses: row.losses ?? 0, ties: row.ties ?? 0 });
+  }
+  return map;
+}
+
+async function getCurrentPeriod(db, leagueId) {
+  const today = new Date().toISOString().slice(0, 10);
+  return db.prepare(
+    `SELECT * FROM matchup_periods WHERE league_id = ? AND start_date <= ? AND end_date >= ? LIMIT 1`
+  ).bind(leagueId, today, today).first();
+}
+
+async function scoreMatchupsForLeague(db, leagueId, league) {
+  const period = await getCurrentPeriod(db, leagueId);
+  if (!period) return 0;
+
+  const { matchups } = await (async () => {
+    const { results } = await db
+      .prepare('SELECT * FROM matchups WHERE period_id = ?')
+      .bind(period.id).all();
+    return { matchups: results || [] };
+  })();
+
+  if (matchups.length === 0) return 0;
+
+  const standings = await computeStandings(db, {
+    leagueId,
+    season: league.season,
+    seasonType: league.season_type || 'playoffs',
+    config: mergeConfig(league.config_json),
+  });
+
+  // Build a map of team_id → {player_id → points}
+  const teamPlayerPoints = new Map();
+  for (const team of (standings.standings || [])) {
+    const playerPts = new Map();
+    for (const p of (team.players || [])) {
+      playerPts.set(p.player_id, p.points ?? 0);
+    }
+    teamPlayerPoints.set(team.id, playerPts);
+  }
+
+  let scored = 0;
+  for (const matchup of matchups) {
+    const calcScore = async (teamId) => {
+      const { results: arRows } = await db
+        .prepare('SELECT player_id, is_active FROM active_roster WHERE team_id = ? AND period_id = ?')
+        .bind(teamId, period.id).all();
+
+      const playerPts = teamPlayerPoints.get(teamId) || new Map();
+
+      if (!arRows || arRows.length === 0) {
+        // No lineup set — sum all players
+        let total = 0;
+        for (const pts of playerPts.values()) total += pts;
+        return total;
+      }
+
+      let total = 0;
+      for (const row of arRows) {
+        if (row.is_active) total += playerPts.get(row.player_id) ?? 0;
+      }
+      return total;
+    };
+
+    const homeScore = await calcScore(matchup.home_team_id);
+    const awayScore = await calcScore(matchup.away_team_id);
+    const winnerId = homeScore > awayScore
+      ? matchup.home_team_id
+      : awayScore > homeScore
+        ? matchup.away_team_id
+        : null;
+
+    await db.prepare(`
+      UPDATE matchups SET home_score = ?, away_score = ?, winner_team_id = ?
+      WHERE id = ?
+    `).bind(homeScore, awayScore, winnerId, matchup.id).run();
+    scored++;
+  }
+
+  return scored;
 }
 
 async function handleApi(request, env, pathname) {
@@ -739,6 +908,832 @@ async function handleApi(request, env, pathname) {
     if (!fields.length) return json({ error: 'Nothing to update' }, { status: 400 });
     const league = await db.prepare(`UPDATE leagues SET ${fields.join(', ')} WHERE id = ? RETURNING *`).bind(...values, leagueId).first();
     return json(publicLeague(league, { role: ctx.role, isOwner: league.owner_user_id === ctx.user.id }));
+  }
+
+  // ── Schedule ──────────────────────────────────────────────────────────────
+  const scheduleMatch = pathname.match(/^\/api\/leagues\/(\d+)\/schedule$/);
+  if (scheduleMatch && request.method === 'GET') {
+    const leagueId = parseId(scheduleMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const { results: periods } = await db
+      .prepare('SELECT * FROM matchup_periods WHERE league_id = ? ORDER BY period_num')
+      .bind(leagueId).all();
+    const { results: matchups } = await db
+      .prepare(`SELECT m.*, t1.name AS home_name, t2.name AS away_name
+                FROM matchups m
+                JOIN teams t1 ON t1.id = m.home_team_id
+                JOIN teams t2 ON t2.id = m.away_team_id
+                WHERE m.league_id = ? ORDER BY m.period_id, m.id`)
+      .bind(leagueId).all();
+    return json({ periods: periods || [], matchups: matchups || [] });
+  }
+
+  const scheduleGenMatch = pathname.match(/^\/api\/leagues\/(\d+)\/schedule\/generate$/);
+  if (scheduleGenMatch && request.method === 'POST') {
+    const leagueId = parseId(scheduleGenMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const { start_date, num_weeks } = await request.json();
+    if (!start_date || !num_weeks || num_weeks < 1 || num_weeks > 52) {
+      return json({ error: 'start_date and num_weeks (1–52) are required' }, { status: 400 });
+    }
+    const teams = await getLeagueTeams(db, leagueId);
+    if (teams.length < 2) return json({ error: 'League needs at least 2 teams' }, { status: 400 });
+
+    const cfg = mergeConfig(ctx.league.config_json);
+    const periods = generateRoundRobin(teams, start_date, num_weeks, cfg.lineup_lock_hour_utc);
+
+    // Wipe existing schedule then insert fresh
+    await db.prepare('DELETE FROM matchup_periods WHERE league_id = ?').bind(leagueId).run();
+
+    for (const p of periods) {
+      const period = await db
+        .prepare(`INSERT INTO matchup_periods (league_id, period_num, start_date, end_date, lock_time)
+                  VALUES (?, ?, ?, ?, ?) RETURNING *`)
+        .bind(leagueId, p.period_num, p.start_date, p.end_date, p.lock_time)
+        .first();
+      for (const m of p.matchups) {
+        await db
+          .prepare(`INSERT INTO matchups (league_id, period_id, home_team_id, away_team_id)
+                    VALUES (?, ?, ?, ?)`)
+          .bind(leagueId, period.id, m.home_team_id, m.away_team_id)
+          .run();
+      }
+    }
+
+    const { results: allPeriods } = await db
+      .prepare('SELECT * FROM matchup_periods WHERE league_id = ? ORDER BY period_num')
+      .bind(leagueId).all();
+    return json({ periods: allPeriods || [] });
+  }
+
+  // ── Lineup ────────────────────────────────────────────────────────────────
+  const lineupMatch = pathname.match(/^\/api\/leagues\/(\d+)\/teams\/(\d+)\/lineup\/(\d+)$/);
+  if (lineupMatch && request.method === 'GET') {
+    const leagueId = parseId(lineupMatch[1]);
+    const teamId   = parseId(lineupMatch[2]);
+    const periodId = parseId(lineupMatch[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const period = await db.prepare('SELECT * FROM matchup_periods WHERE id = ? AND league_id = ?')
+      .bind(periodId, leagueId).first();
+    if (!period) return json({ error: 'Period not found' }, { status: 404 });
+
+    const lineupTeam = await db.prepare('SELECT id FROM teams WHERE id = ? AND league_id = ?')
+      .bind(teamId, leagueId).first();
+    if (!lineupTeam) return json({ error: 'Team not found in this league' }, { status: 404 });
+
+    const cfg = mergeConfig(ctx.league.config_json);
+    const slots = getActiveSlots(cfg);
+    const locked = period.lock_time ? new Date(period.lock_time).getTime() <= Date.now() : false;
+
+    const players = await getTeamPlayers(db, teamId);
+    const { results: arRows } = await db
+      .prepare('SELECT player_id, is_active FROM active_roster WHERE team_id = ? AND period_id = ?')
+      .bind(teamId, periodId).all();
+
+    let activeMap;
+    if (arRows && arRows.length > 0) {
+      activeMap = new Map(arRows.map(r => [r.player_id, !!r.is_active]));
+    } else {
+      // Auto-seed: first N players per position are active
+      const countByPos = { F: 0, D: 0, G: 0 };
+      activeMap = new Map(players.map(p => {
+        const pos = mapPosition(p.position);
+        const limit = slots[pos] ?? 0;
+        const active = countByPos[pos] < limit;
+        countByPos[pos]++;
+        return [p.player_id, active];
+      }));
+    }
+
+    const active = players.filter(p => activeMap.get(p.player_id));
+    const bench  = players.filter(p => !activeMap.get(p.player_id));
+    return json({ active, bench, slots, locked });
+  }
+
+  if (lineupMatch && request.method === 'PUT') {
+    const leagueId = parseId(lineupMatch[1]);
+    const teamId   = parseId(lineupMatch[2]);
+    const periodId = parseId(lineupMatch[3]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT * FROM teams WHERE id = ? AND league_id = ?')
+      .bind(teamId, leagueId).first();
+    if (!team) return json({ error: 'Team not found' }, { status: 404 });
+    if (team.user_id !== ctx.user.id && !isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+      return json({ error: 'You can only set your own lineup' }, { status: 403 });
+    }
+
+    const period = await db.prepare('SELECT * FROM matchup_periods WHERE id = ? AND league_id = ?')
+      .bind(periodId, leagueId).first();
+    if (!period) return json({ error: 'Period not found' }, { status: 404 });
+    if (period.lock_time && new Date(period.lock_time).getTime() <= Date.now()) {
+      return json({ error: 'Lineup is locked for this period' }, { status: 400 });
+    }
+
+    const { active_player_ids } = await request.json(); // array of player_id integers
+    if (!Array.isArray(active_player_ids)) {
+      return json({ error: 'active_player_ids must be an array' }, { status: 400 });
+    }
+
+    const cfg = mergeConfig(ctx.league.config_json);
+    const slots = getActiveSlots(cfg);
+    const players = await getTeamPlayers(db, teamId);
+    const playerMap = new Map(players.map(p => [p.player_id, p]));
+    const activeSet = new Set(active_player_ids.map(Number));
+
+    // Validate slot limits
+    const countByPos = { F: 0, D: 0, G: 0 };
+    for (const pid of activeSet) {
+      const p = playerMap.get(pid);
+      if (!p) return json({ error: `Player ${pid} not on this team` }, { status: 400 });
+      const pos = mapPosition(p.position);
+      countByPos[pos]++;
+    }
+    for (const [pos, count] of Object.entries(countByPos)) {
+      if (count > (slots[pos] ?? 0)) {
+        return json({ error: `Too many active ${pos} (max ${slots[pos]})` }, { status: 400 });
+      }
+    }
+
+    // Upsert all players
+    for (const p of players) {
+      const isActive = activeSet.has(p.player_id) ? 1 : 0;
+      await db.prepare(`
+        INSERT INTO active_roster (team_id, player_id, period_id, is_active)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(team_id, player_id, period_id) DO UPDATE SET is_active = excluded.is_active
+      `).bind(teamId, p.player_id, periodId, isActive).run();
+    }
+
+    return json({ success: true });
+  }
+
+  // ── Matchups ──────────────────────────────────────────────────────────────
+  const matchupCurrentMatch = pathname.match(/^\/api\/leagues\/(\d+)\/matchups\/current$/);
+  if (matchupCurrentMatch && request.method === 'GET') {
+    const leagueId = parseId(matchupCurrentMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const period = await getCurrentPeriod(db, leagueId);
+    if (!period) return json({ period: null, matchup: null });
+
+    const myTeam = await db
+      .prepare('SELECT * FROM teams WHERE league_id = ? AND user_id = ? LIMIT 1')
+      .bind(leagueId, ctx.user.id).first();
+    if (!myTeam) return json({ error: 'You have no team in this league' }, { status: 404 });
+
+    const matchup = await db.prepare(`
+      SELECT m.*, t1.name AS home_name, t2.name AS away_name
+      FROM matchups m
+      JOIN teams t1 ON t1.id = m.home_team_id
+      JOIN teams t2 ON t2.id = m.away_team_id
+      WHERE m.period_id = ? AND (m.home_team_id = ? OR m.away_team_id = ?)
+      LIMIT 1
+    `).bind(period.id, myTeam.id, myTeam.id).first();
+
+    if (!matchup) return json({ period, matchup: null });
+
+    const oppTeamId = matchup.home_team_id === myTeam.id ? matchup.away_team_id : matchup.home_team_id;
+    const oppTeam = await db.prepare('SELECT * FROM teams WHERE id = ?').bind(oppTeamId).first();
+    const oppPlayers = await getTeamPlayers(db, oppTeamId);
+
+    return json({ period, matchup, myTeam, oppTeam, oppPlayers });
+  }
+
+  const matchupPeriodMatch = pathname.match(/^\/api\/leagues\/(\d+)\/matchups\/(\d+)$/);
+  if (matchupPeriodMatch && request.method === 'GET') {
+    const leagueId = parseId(matchupPeriodMatch[1]);
+    const periodId = parseId(matchupPeriodMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const period = await db.prepare('SELECT * FROM matchup_periods WHERE id = ? AND league_id = ?')
+      .bind(periodId, leagueId).first();
+    if (!period) return json({ error: 'Period not found' }, { status: 404 });
+    const { results: matchups } = await db.prepare(`
+      SELECT m.*, t1.name AS home_name, t2.name AS away_name
+      FROM matchups m
+      JOIN teams t1 ON t1.id = m.home_team_id
+      JOIN teams t2 ON t2.id = m.away_team_id
+      WHERE m.period_id = ?
+    `).bind(periodId).all();
+    return json({ period, matchups: matchups || [] });
+  }
+
+  const matchupScoreMatch = pathname.match(/^\/api\/leagues\/(\d+)\/matchups\/score$/);
+  if (matchupScoreMatch && request.method === 'POST') {
+    const leagueId = parseId(matchupScoreMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+    const scored = await scoreMatchupsForLeague(db, leagueId, ctx.league);
+    return json({ scored });
+  }
+
+  // ── Draft ────────────────────────────────────────────────────────────────
+
+  const draftSessionMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session$/);
+
+  if (draftSessionMatch && request.method === 'POST') {
+    const leagueId = parseId(draftSessionMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const existing = await db.prepare('SELECT id, status FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (existing && existing.status !== 'pending') {
+      return json({ error: 'A draft session already exists and cannot be reset' }, { status: 400 });
+    }
+    if (existing) {
+      await db.prepare('UPDATE draft_sessions SET draft_order_json = ?, current_pick = 0, total_picks = 0, pick_deadline = NULL WHERE id = ?')
+        .bind('[]', existing.id).run();
+      return json({ id: existing.id });
+    }
+    const session = await db.prepare('INSERT INTO draft_sessions (league_id) VALUES (?) RETURNING id').bind(leagueId).first();
+    return json({ id: session.id });
+  }
+
+  if (draftSessionMatch && request.method === 'GET') {
+    const leagueId = parseId(draftSessionMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const session = await db.prepare('SELECT * FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ session: null, picks: [], myQueue: [] });
+
+    const { results: picks } = await db.prepare(`
+      SELECT dp.*, t.name AS team_name FROM draft_picks dp
+      JOIN teams t ON t.id = dp.team_id
+      WHERE dp.draft_session_id = ? ORDER BY dp.overall_pick
+    `).bind(session.id).all();
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?').bind(leagueId, ctx.user.id).first();
+    const myQueue = myTeam
+      ? (await db.prepare('SELECT * FROM draft_queues WHERE draft_session_id = ? AND team_id = ? ORDER BY rank_order').bind(session.id, myTeam.id).all()).results || []
+      : [];
+
+    const draftOrder = JSON.parse(session.draft_order_json || '[]');
+    let teamNames = {};
+    if (draftOrder.length > 0) {
+      const ph = draftOrder.map(() => '?').join(',');
+      const { results: tms } = await db.prepare(`SELECT id, name FROM teams WHERE id IN (${ph})`).bind(...draftOrder).all();
+      teamNames = Object.fromEntries((tms || []).map(t => [t.id, t.name]));
+    }
+
+    return json({
+      session: { ...session, draft_order: draftOrder.map(id => ({ teamId: id, teamName: teamNames[id] || '' })) },
+      picks: (picks || []).map(p => ({ ...p, player_meta: JSON.parse(p.player_meta_json || '{}') })),
+      myQueue: myQueue.map(q => ({ ...q, player_meta: JSON.parse(q.player_meta_json || '{}') })),
+    });
+  }
+
+  const draftOrderMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/order$/);
+  if (draftOrderMatch && request.method === 'PUT') {
+    const leagueId = parseId(draftOrderMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const { order } = await request.json();
+    if (!Array.isArray(order) || order.length === 0) return json({ error: 'order must be a non-empty array of teamIds' }, { status: 400 });
+
+    const { results: teams } = await db.prepare('SELECT id FROM teams WHERE league_id = ?').bind(leagueId).all();
+    const validIds = new Set((teams || []).map(t => t.id));
+    if (!order.every(id => validIds.has(id))) return json({ error: 'Invalid team ID in order' }, { status: 400 });
+
+    const session = await db.prepare('SELECT id, status FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No draft session found' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Draft already started' }, { status: 400 });
+
+    await db.prepare('UPDATE draft_sessions SET draft_order_json = ? WHERE id = ?').bind(JSON.stringify(order), session.id).run();
+    return json({ ok: true });
+  }
+
+  const draftRandomizeMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/randomize$/);
+  if (draftRandomizeMatch && request.method === 'POST') {
+    const leagueId = parseId(draftRandomizeMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const session = await db.prepare('SELECT id, status FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No draft session found' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Draft already started' }, { status: 400 });
+
+    const { results: teams } = await db.prepare('SELECT id FROM teams WHERE league_id = ?').bind(leagueId).all();
+    const order = (teams || []).map(t => t.id).sort(() => Math.random() - 0.5);
+    await db.prepare('UPDATE draft_sessions SET draft_order_json = ? WHERE id = ?').bind(JSON.stringify(order), session.id).run();
+    return json({ order });
+  }
+
+  const draftStartMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/start$/);
+  if (draftStartMatch && request.method === 'POST') {
+    const leagueId = parseId(draftStartMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const session = await db.prepare('SELECT * FROM draft_sessions WHERE league_id = ?').bind(leagueId).first();
+    if (!session) return json({ error: 'No draft session found' }, { status: 404 });
+    if (session.status !== 'pending') return json({ error: 'Draft already started' }, { status: 400 });
+
+    const draftOrder = JSON.parse(session.draft_order_json || '[]');
+    if (draftOrder.length === 0) return json({ error: 'Draft order not set' }, { status: 400 });
+
+    const config = mergeConfig(ctx.league.config_json);
+    const rounds = config.roster.maxF + config.roster.maxD + config.roster.maxG;
+    const totalPicks = rounds * draftOrder.length;
+    const timerSeconds = config.pick_timer_seconds;
+    const pickDeadline = new Date(Date.now() + timerSeconds * 1000).toISOString();
+
+    // Seed rankings from NHL API — best effort, non-blocking on failure
+    const rankInserts = [];
+    let globalRank = 1;
+    try {
+      const skaterRes = await fetch(`${NHL_BASE}/skater-stats-leaders/current?categories=points&limit=200`, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0' },
+      });
+      if (skaterRes.ok) {
+        const skaterData = await skaterRes.json();
+        // The API returns the top players under a key matching the category name
+        const skaters = skaterData.skaterPoints || skaterData.data || [];
+        for (const s of skaters) {
+          const posCode = s.positionCode || '';
+          const position = posCode === 'D' ? 'D' : 'F';
+          const name = s.name?.default || `${s.firstName?.default || ''} ${s.lastName?.default || ''}`.trim();
+          const meta = JSON.stringify({
+            position, nhl_team: s.teamAbbrevs || '',
+            headshot_url: normalizeHeadshotUrl(s.headshot), crest_url: '',
+          });
+          rankInserts.push(db.prepare(`
+            INSERT OR IGNORE INTO draft_player_rankings (draft_session_id, player_id, player_name, player_meta_json, global_rank)
+            VALUES (?, ?, ?, ?, ?)
+          `).bind(session.id, s.id || s.playerId, name, meta, globalRank++));
+        }
+      }
+      const goalieRes = await fetch(`${NHL_BASE}/goalie-stats-leaders/current?categories=wins&limit=30`, {
+        headers: { 'User-Agent': 'PlayoffFantasy/1.0' },
+      });
+      if (goalieRes.ok) {
+        const goalieData = await goalieRes.json();
+        const goalies = goalieData.goalieWins || goalieData.data || [];
+        for (const g of goalies) {
+          const name = g.name?.default || `${g.firstName?.default || ''} ${g.lastName?.default || ''}`.trim();
+          const meta = JSON.stringify({
+            position: 'G', nhl_team: g.teamAbbrevs || '',
+            headshot_url: normalizeHeadshotUrl(g.headshot), crest_url: '',
+          });
+          rankInserts.push(db.prepare(`
+            INSERT OR IGNORE INTO draft_player_rankings (draft_session_id, player_id, player_name, player_meta_json, global_rank)
+            VALUES (?, ?, ?, ?, ?)
+          `).bind(session.id, g.id || g.playerId, name, meta, globalRank++));
+        }
+      }
+    } catch (e) {
+      console.error('[draft] rankings seed failed, continuing:', e?.message);
+    }
+
+    // D1 batch limit is 100 statements — chunk if needed
+    for (let i = 0; i < rankInserts.length; i += 100) {
+      await db.batch(rankInserts.slice(i, i + 100));
+    }
+
+    await db.prepare(`
+      UPDATE draft_sessions SET status = 'active', started_at = ?, total_picks = ?, pick_deadline = ? WHERE id = ?
+    `).bind(new Date().toISOString(), totalPicks, pickDeadline, session.id).run();
+
+    // Trigger the DO alarm
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+    await stub.fetch(new Request('https://internal/alarm-reset', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    })).catch(e => console.error('[draft] DO alarm trigger failed:', e?.message));
+
+    return json({ ok: true, totalPicks, pickDeadline });
+  }
+
+  const draftWsMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/ws$/);
+  if (draftWsMatch && request.method === 'GET') {
+    const leagueId = parseId(draftWsMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?').bind(leagueId, ctx.user.id).first();
+    const isComm = isCommissioner(ctx.league, ctx.role, ctx.user.id);
+
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+
+    const proxiedReq = new Request(request.url, {
+      method: request.method,
+      headers: new Headers({
+        ...Object.fromEntries(request.headers),
+        'X-League-Id': String(leagueId),
+        'X-User-Id': String(ctx.user.id),
+        'X-Team-Id': String(myTeam?.id || ''),
+        'X-Is-Commissioner': String(isComm),
+      }),
+    });
+
+    return stub.fetch(proxiedReq);
+  }
+
+  const draftPauseMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/pause$/);
+  if (draftPauseMatch && request.method === 'POST') {
+    const leagueId = parseId(draftPauseMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    await db.prepare("UPDATE draft_sessions SET status = 'paused' WHERE league_id = ?").bind(leagueId).run();
+
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+    await stub.fetch(new Request('https://internal/pause', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    })).catch(console.error);
+
+    return json({ ok: true });
+  }
+
+  const draftResumeMatch = pathname.match(/^\/api\/leagues\/(\d+)\/draft\/session\/resume$/);
+  if (draftResumeMatch && request.method === 'POST') {
+    const leagueId = parseId(draftResumeMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) return json({ error: 'Commissioner only' }, { status: 403 });
+
+    const config = mergeConfig(ctx.league.config_json);
+    const pickDeadline = new Date(Date.now() + config.pick_timer_seconds * 1000).toISOString();
+    await db.prepare("UPDATE draft_sessions SET status = 'active', pick_deadline = ? WHERE league_id = ?").bind(pickDeadline, leagueId).run();
+
+    const doId = env.DRAFT_ROOM.idFromName(`league-${leagueId}`);
+    const stub = env.DRAFT_ROOM.get(doId);
+    await stub.fetch(new Request('https://internal/alarm-reset', {
+      method: 'POST',
+      headers: { 'X-League-Id': String(leagueId) },
+    })).catch(console.error);
+
+    return json({ ok: true, pickDeadline });
+  }
+
+  // ── Waivers ───────────────────────────────────────────────────────────────
+  const dropPlayerMatch = pathname.match(/^\/api\/leagues\/(\d+)\/players\/(\d+)\/drop$/);
+  if (dropPlayerMatch && request.method === 'POST') {
+    const leagueId = parseId(dropPlayerMatch[1]);
+    const playerId = parseId(dropPlayerMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
+
+    const player = await db.prepare('SELECT * FROM team_players WHERE team_id = ? AND player_id = ?')
+      .bind(team.id, playerId).first();
+    if (!player) return json({ error: 'Player not on your team' }, { status: 404 });
+
+    const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const meta = JSON.stringify({
+      position: player.position,
+      nhl_team: player.nhl_team,
+      headshot_url: player.headshot_url,
+      crest_url: player.crest_url,
+    });
+
+    await db.batch([
+      db.prepare('DELETE FROM team_players WHERE id = ?').bind(player.id),
+      db.prepare(`INSERT INTO dropped_players
+        (league_id, player_id, player_name, player_meta_json, dropped_by_team_id, status, waiver_deadline)
+        VALUES (?, ?, ?, ?, ?, 'waivers', ?)`)
+        .bind(leagueId, playerId, player.player_name, meta, team.id, deadline),
+    ]);
+
+    return json({ ok: true, waiver_deadline: deadline });
+  }
+
+  const waiversListMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers$/);
+  if (waiversListMatch && request.method === 'GET') {
+    const leagueId = parseId(waiversListMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { results: players } = await db.prepare(`
+      SELECT dp.*, t.name AS dropped_by_team_name
+      FROM dropped_players dp
+      JOIN teams t ON t.id = dp.dropped_by_team_id
+      WHERE dp.league_id = ? AND dp.status IN ('waivers', 'free_agent')
+      ORDER BY dp.dropped_at DESC
+    `).bind(leagueId).all();
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+
+    const myClaims = myTeam
+      ? (await db.prepare(`SELECT * FROM waiver_claims WHERE team_id = ? AND status = 'pending'`)
+          .bind(myTeam.id).all()).results || []
+      : [];
+
+    return json({ players: players || [], myClaims });
+  }
+
+  const waiverClaimMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers\/claim$/);
+  if (waiverClaimMatch && request.method === 'POST') {
+    const leagueId = parseId(waiverClaimMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { dropped_player_id, drop_player_id } = await request.json();
+    if (!dropped_player_id) return json({ error: 'dropped_player_id required' }, { status: 400 });
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
+
+    const dp = await db.prepare('SELECT id, status, waiver_deadline FROM dropped_players WHERE id = ? AND league_id = ?')
+      .bind(dropped_player_id, leagueId).first();
+    if (!dp) return json({ error: 'Player not found' }, { status: 404 });
+    if (dp.status !== 'waivers') return json({ error: 'Player is not on waivers' }, { status: 400 });
+    if (dp.waiver_deadline && new Date(dp.waiver_deadline) <= new Date()) {
+      return json({ error: 'Waiver window has closed' }, { status: 400 });
+    }
+
+    const existing = await db.prepare(
+      `SELECT id FROM waiver_claims WHERE team_id = ? AND dropped_player_id = ? AND status = 'pending'`
+    ).bind(team.id, dropped_player_id).first();
+    if (existing) return json({ error: 'Already have a pending claim on this player' }, { status: 400 });
+
+    const member = await db.prepare('SELECT waiver_priority FROM league_members WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    const priority = member?.waiver_priority ?? 0;
+
+    const row = await db.prepare(`
+      INSERT INTO waiver_claims (league_id, team_id, dropped_player_id, drop_player_id, priority_at_time, status)
+      VALUES (?, ?, ?, ?, ?, 'pending') RETURNING id
+    `).bind(leagueId, team.id, dropped_player_id, drop_player_id ?? null, priority).first();
+
+    return json({ ok: true, claim_id: row.id });
+  }
+
+  const waiverClaimCancelMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers\/claim\/(\d+)$/);
+  if (waiverClaimCancelMatch && request.method === 'DELETE') {
+    const leagueId = parseId(waiverClaimCancelMatch[1]);
+    const claimId = parseId(waiverClaimCancelMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+
+    const claim = await db.prepare('SELECT id, status, team_id FROM waiver_claims WHERE id = ? AND league_id = ?')
+      .bind(claimId, leagueId).first();
+    if (!claim) return json({ error: 'Claim not found' }, { status: 404 });
+    if (claim.team_id !== team.id) return json({ error: 'Not your claim' }, { status: 403 });
+    if (claim.status !== 'pending') return json({ error: 'Claim already processed' }, { status: 400 });
+
+    await db.prepare(`UPDATE waiver_claims SET status = 'expired' WHERE id = ?`).bind(claimId).run();
+    return json({ ok: true });
+  }
+
+  const freeAgentPickupMatch = pathname.match(/^\/api\/leagues\/(\d+)\/free-agents\/(\d+)\/pickup$/);
+  if (freeAgentPickupMatch && request.method === 'POST') {
+    const leagueId = parseId(freeAgentPickupMatch[1]);
+    const droppedPlayerId = parseId(freeAgentPickupMatch[2]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const team = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!team) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
+
+    const dp = await db.prepare('SELECT * FROM dropped_players WHERE id = ? AND league_id = ?')
+      .bind(droppedPlayerId, leagueId).first();
+    if (!dp) return json({ error: 'Player not found' }, { status: 404 });
+    if (dp.status !== 'free_agent') return json({ error: 'Player is not a free agent' }, { status: 400 });
+
+    const meta = JSON.parse(dp.player_meta_json || '{}');
+
+    const config = mergeConfig(ctx.league.config_json);
+    const pos = meta.position || '';
+    const capKey = pos === 'G' ? 'maxG' : pos === 'D' ? 'maxD' : 'maxF';
+    const { results: roster } = await db.prepare(
+      `SELECT id FROM team_players WHERE team_id = ? AND position = ?`
+    ).bind(team.id, pos).all();
+    if ((roster || []).length >= (config.roster[capKey] ?? 99)) {
+      return json({ error: `Roster full for position ${pos}` }, { status: 400 });
+    }
+
+    try {
+      await db.batch([
+        db.prepare(`UPDATE dropped_players SET status = 'claimed' WHERE id = ?`).bind(droppedPlayerId),
+        db.prepare(`INSERT INTO team_players
+          (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url)
+          VALUES (?, ?, ?, ?, ?, '', ?, ?)`)
+          .bind(team.id, dp.player_id, dp.player_name, meta.nhl_team || '', meta.position || '',
+                meta.headshot_url || '', meta.crest_url || ''),
+      ]);
+    } catch {
+      return json({ error: 'Player is already on your team' }, { status: 400 });
+    }
+
+    return json({ ok: true });
+  }
+
+  const waiverResetMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers\/reset-priorities$/);
+  if (waiverResetMatch && request.method === 'POST') {
+    const leagueId = parseId(waiverResetMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+      return json({ error: 'Commissioner only' }, { status: 403 });
+    }
+    await db.prepare('UPDATE league_members SET waiver_priority = 0 WHERE league_id = ?').bind(leagueId).run();
+    return json({ ok: true });
+  }
+
+  // ── Trades ────────────────────────────────────────────────────────────────
+  const tradesListMatch = pathname.match(/^\/api\/leagues\/(\d+)\/trades$/);
+  if (tradesListMatch && request.method === 'GET') {
+    const leagueId = parseId(tradesListMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { results: trades } = await db.prepare(`
+      SELECT tp.*, t1.name AS proposing_team_name, t2.name AS receiving_team_name
+      FROM trade_proposals tp
+      JOIN teams t1 ON t1.id = tp.proposing_team_id
+      JOIN teams t2 ON t2.id = tp.receiving_team_id
+      WHERE tp.league_id = ?
+      ORDER BY tp.created_at DESC
+    `).bind(leagueId).all();
+
+    const result = await Promise.all((trades || []).map(async (t) => {
+      const { results: items } = await db.prepare('SELECT * FROM trade_items WHERE trade_id = ?').bind(t.id).all();
+      return { ...t, items: items || [] };
+    }));
+
+    return json({ trades: result });
+  }
+
+  if (tradesListMatch && request.method === 'POST') {
+    const leagueId = parseId(tradesListMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const { receiving_team_id, offering, requesting } = await request.json();
+    if (!receiving_team_id || !Array.isArray(offering) || !Array.isArray(requesting)
+        || offering.length === 0 || requesting.length === 0) {
+      return json({ error: 'receiving_team_id, offering (non-empty), and requesting (non-empty) required' }, { status: 400 });
+    }
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+    if (!myTeam) return json({ error: 'You have no team in this league' }, { status: 404 });
+    if (ctx.league.is_locked) return json({ error: 'League is locked' }, { status: 403 });
+    if (myTeam.id === receiving_team_id) return json({ error: 'Cannot trade with yourself' }, { status: 400 });
+
+    const receivingTeam = await db.prepare('SELECT id FROM teams WHERE id = ? AND league_id = ?')
+      .bind(receiving_team_id, leagueId).first();
+    if (!receivingTeam) return json({ error: 'Receiving team not found' }, { status: 404 });
+
+    for (const pid of offering) {
+      const p = await db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(myTeam.id, pid).first();
+      if (!p) return json({ error: `Player ${pid} not on your team` }, { status: 400 });
+    }
+    for (const pid of requesting) {
+      const p = await db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(receiving_team_id, pid).first();
+      if (!p) return json({ error: `Player ${pid} not on receiving team` }, { status: 400 });
+    }
+
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    const trade = await db.prepare(`
+      INSERT INTO trade_proposals (league_id, proposing_team_id, receiving_team_id, status, expires_at)
+      VALUES (?, ?, ?, 'pending', ?) RETURNING id
+    `).bind(leagueId, myTeam.id, receiving_team_id, expiresAt).first();
+
+    const offeringRows = await Promise.all(offering.map(pid =>
+      db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(myTeam.id, pid).first()
+    ));
+    const requestingRows = await Promise.all(requesting.map(pid =>
+      db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(receiving_team_id, pid).first()
+    ));
+
+    await db.batch([
+      ...offeringRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+        .bind(trade.id, myTeam.id, p.player_id, p.player_name)),
+      ...requestingRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+        .bind(trade.id, receiving_team_id, p.player_id, p.player_name)),
+    ]);
+
+    return json({ ok: true, trade_id: trade.id });
+  }
+
+  const tradeActionMatch = pathname.match(/^\/api\/leagues\/(\d+)\/trades\/(\d+)\/(accept|reject|counter|veto)$/);
+  if (tradeActionMatch && request.method === 'PUT') {
+    const leagueId = parseId(tradeActionMatch[1]);
+    const tradeId = parseId(tradeActionMatch[2]);
+    const action = tradeActionMatch[3];
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+
+    const trade = await db.prepare('SELECT * FROM trade_proposals WHERE id = ? AND league_id = ?')
+      .bind(tradeId, leagueId).first();
+    if (!trade) return json({ error: 'Trade not found' }, { status: 404 });
+
+    const myTeam = await db.prepare('SELECT id FROM teams WHERE league_id = ? AND user_id = ?')
+      .bind(leagueId, ctx.user.id).first();
+
+    if (action === 'accept' || action === 'reject' || action === 'counter') {
+      if (!myTeam || myTeam.id !== trade.receiving_team_id) {
+        return json({ error: 'Only the receiving team can respond to this trade' }, { status: 403 });
+      }
+      if (trade.status !== 'pending') {
+        return json({ error: 'Trade is no longer pending' }, { status: 400 });
+      }
+
+      if (action === 'accept') {
+        const config = mergeConfig(ctx.league.config_json);
+        const vetoDeadline = new Date(Date.now() + (config.trade_veto_hours ?? 24) * 60 * 60 * 1000).toISOString();
+        await db.prepare(`UPDATE trade_proposals SET status = 'accepted', veto_deadline = ? WHERE id = ?`)
+          .bind(vetoDeadline, tradeId).run();
+        return json({ ok: true, veto_deadline: vetoDeadline });
+      }
+
+      if (action === 'reject') {
+        await db.prepare(`UPDATE trade_proposals SET status = 'rejected' WHERE id = ?`).bind(tradeId).run();
+        return json({ ok: true });
+      }
+
+      if (action === 'counter') {
+        const { offering, requesting } = await request.json();
+        if (!Array.isArray(offering) || !Array.isArray(requesting) || offering.length === 0 || requesting.length === 0) {
+          return json({ error: 'offering and requesting arrays required' }, { status: 400 });
+        }
+        for (const pid of offering) {
+          const p = await db.prepare('SELECT player_id FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(myTeam.id, pid).first();
+          if (!p) return json({ error: `Player ${pid} not on your team` }, { status: 400 });
+        }
+        for (const pid of requesting) {
+          const p = await db.prepare('SELECT player_id FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(trade.proposing_team_id, pid).first();
+          if (!p) return json({ error: `Player ${pid} not on opposing team` }, { status: 400 });
+        }
+
+        const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+        await db.prepare(`UPDATE trade_proposals SET status = 'countered' WHERE id = ?`).bind(tradeId).run();
+
+        const counter = await db.prepare(`
+          INSERT INTO trade_proposals (league_id, proposing_team_id, receiving_team_id, status, expires_at)
+          VALUES (?, ?, ?, 'pending', ?) RETURNING id
+        `).bind(leagueId, myTeam.id, trade.proposing_team_id, expiresAt).first();
+
+        const offeringRows = await Promise.all(offering.map(pid =>
+          db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(myTeam.id, pid).first()
+        ));
+        const requestingRows = await Promise.all(requesting.map(pid =>
+          db.prepare('SELECT player_id, player_name FROM team_players WHERE team_id = ? AND player_id = ?')
+            .bind(trade.proposing_team_id, pid).first()
+        ));
+
+        await db.batch([
+          ...offeringRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+            .bind(counter.id, myTeam.id, p.player_id, p.player_name)),
+          ...requestingRows.map(p => db.prepare('INSERT INTO trade_items (trade_id, from_team_id, player_id, player_name) VALUES (?, ?, ?, ?)')
+            .bind(counter.id, trade.proposing_team_id, p.player_id, p.player_name)),
+        ]);
+
+        return json({ ok: true, counter_trade_id: counter.id });
+      }
+    }
+
+    if (action === 'veto') {
+      if (!isCommissioner(ctx.league, ctx.role, ctx.user.id)) {
+        return json({ error: 'Commissioner only' }, { status: 403 });
+      }
+      if (trade.status !== 'accepted') {
+        return json({ error: 'Can only veto accepted trades' }, { status: 400 });
+      }
+      await db.prepare(`UPDATE trade_proposals SET status = 'vetoed' WHERE id = ?`).bind(tradeId).run();
+      return json({ ok: true });
+    }
   }
 
   // League-scoped teams
@@ -1549,7 +2544,26 @@ async function computeStandings(db, { leagueId, season, seasonType = 'playoffs',
         return { ...team, players, totalPoints: Math.round(totalPoints * 10) / 10 };
       });
 
-      standings.sort((a, b) => b.totalPoints - a.totalPoints);
+      // Attach W/L/T records if the league has a schedule
+      let records = new Map();
+      if (leagueId != null) {
+        try { records = await getTeamRecords(db, leagueId); } catch {}
+      }
+      for (const team of standings) {
+        const r = records.get(team.id) || { wins: 0, losses: 0, ties: 0 };
+        team.wins   = r.wins;
+        team.losses = r.losses;
+        team.ties   = r.ties;
+      }
+
+      // Sort by W/L/T record first, then total points as tiebreaker
+      standings.sort((a, b) => {
+        const aWin = (a.wins ?? 0) - (a.losses ?? 0);
+        const bWin = (b.wins ?? 0) - (b.losses ?? 0);
+        if (bWin !== aWin) return bWin - aWin;
+        return b.totalPoints - a.totalPoints;
+      });
+
       const eliminatedTeams = seasonType === 'regular' ? [] : await getEliminatedTeams(season, db);
       let teamSnapshotErrors = 0;
       await Promise.all(
@@ -1606,6 +2620,155 @@ async function computeStandings(db, { leagueId, season, seasonType = 'playoffs',
     }
 }
 
+async function processWaivers(db, leagueId) {
+  const now = new Date().toISOString();
+
+  const { results: expiredPlayers } = await db.prepare(`
+    SELECT * FROM dropped_players
+    WHERE league_id = ? AND status = 'waivers' AND waiver_deadline <= ?
+  `).bind(leagueId, now).all();
+
+  for (const dp of (expiredPlayers || [])) {
+    const { results: claims } = await db.prepare(`
+      SELECT wc.* FROM waiver_claims wc
+      WHERE wc.dropped_player_id = ? AND wc.status = 'pending'
+      ORDER BY wc.priority_at_time ASC, wc.created_at ASC
+    `).bind(dp.id).all();
+
+    if (!claims || claims.length === 0) {
+      await db.prepare(`UPDATE dropped_players SET status = 'free_agent' WHERE id = ?`).bind(dp.id).run();
+      continue;
+    }
+
+    let winnerClaim = null;
+    for (const claim of claims) {
+      if (claim.drop_player_id) {
+        const dropTarget = await db.prepare(
+          'SELECT id FROM team_players WHERE team_id = ? AND player_id = ?'
+        ).bind(claim.team_id, claim.drop_player_id).first();
+        if (!dropTarget) continue;
+      }
+      winnerClaim = claim;
+      break;
+    }
+
+    if (!winnerClaim) {
+      await db.batch([
+        db.prepare(`UPDATE dropped_players SET status = 'free_agent' WHERE id = ?`).bind(dp.id),
+        db.prepare(`UPDATE waiver_claims SET status = 'denied', processed_at = ?
+          WHERE dropped_player_id = ? AND status = 'pending'`).bind(now, dp.id),
+      ]);
+      continue;
+    }
+
+    const meta = JSON.parse(dp.player_meta_json || '{}');
+    const pos = meta.position || '';
+    const capKey = pos === 'G' ? 'maxG' : pos === 'D' ? 'maxD' : 'maxF';
+
+    const leagueRow = await db.prepare('SELECT config_json FROM leagues WHERE id = ?').bind(leagueId).first();
+    const cfg = mergeConfig(leagueRow?.config_json);
+    const { results: currentRoster } = await db.prepare(
+      `SELECT id FROM team_players WHERE team_id = ? AND position = ?`
+    ).bind(winnerClaim.team_id, pos).all();
+    const atCap = (currentRoster || []).length >= (cfg.roster[capKey] ?? 99);
+
+    if (atCap && !winnerClaim.drop_player_id) {
+      // Winning team is at cap and didn't specify a drop — deny their claim, player becomes free agent
+      await db.prepare(`UPDATE waiver_claims SET status = 'denied', processed_at = ?
+        WHERE id = ?`).bind(now, winnerClaim.id).run();
+      await db.prepare(`UPDATE dropped_players SET status = 'free_agent' WHERE id = ?`).bind(dp.id).run();
+      continue;
+    }
+
+    const batchOps = [
+      db.prepare(`UPDATE dropped_players SET status = 'claimed' WHERE id = ?`).bind(dp.id),
+      db.prepare(`UPDATE waiver_claims SET status = 'approved', processed_at = ? WHERE id = ?`).bind(now, winnerClaim.id),
+      db.prepare(`UPDATE waiver_claims SET status = 'denied', processed_at = ?
+        WHERE dropped_player_id = ? AND status = 'pending' AND id != ?`).bind(now, dp.id, winnerClaim.id),
+      db.prepare(`INSERT INTO team_players
+        (team_id, player_id, player_name, nhl_team, position, position_detail, headshot_url, crest_url)
+        VALUES (?, ?, ?, ?, ?, '', ?, ?)`)
+        .bind(winnerClaim.team_id, dp.player_id, dp.player_name,
+              meta.nhl_team || '', meta.position || '', meta.headshot_url || '', meta.crest_url || ''),
+    ];
+
+    if (winnerClaim.drop_player_id) {
+      batchOps.push(
+        db.prepare('DELETE FROM team_players WHERE team_id = ? AND player_id = ?')
+          .bind(winnerClaim.team_id, winnerClaim.drop_player_id)
+      );
+    }
+
+    try {
+      await db.batch(batchOps);
+    } catch {
+      console.error(`[cron] waiver claim ${winnerClaim.id} batch failed (unique constraint?)`, leagueId);
+      continue;
+    }
+
+    // Move winning team to last waiver priority
+    const winTeam = await db.prepare('SELECT user_id FROM teams WHERE id = ?').bind(winnerClaim.team_id).first();
+    if (winTeam) {
+      const { results: members } = await db.prepare(
+        'SELECT waiver_priority FROM league_members WHERE league_id = ?'
+      ).bind(leagueId).all();
+      const maxPriority = Math.max(...(members || []).map(m => m.waiver_priority), 0);
+      await db.prepare('UPDATE league_members SET waiver_priority = ? WHERE league_id = ? AND user_id = ?')
+        .bind(maxPriority + 1, leagueId, winTeam.user_id).run();
+    }
+  }
+}
+
+async function executeTrades(db, leagueId) {
+  const now = new Date().toISOString();
+
+  const { results: readyTrades } = await db.prepare(`
+    SELECT * FROM trade_proposals
+    WHERE league_id = ? AND status = 'accepted' AND veto_deadline <= ?
+  `).bind(leagueId, now).all();
+
+  for (const trade of (readyTrades || [])) {
+    const { results: items } = await db.prepare('SELECT * FROM trade_items WHERE trade_id = ?')
+      .bind(trade.id).all();
+
+    // Verify every player is still on their original team
+    let valid = true;
+    for (const item of (items || [])) {
+      const still = await db.prepare('SELECT id FROM team_players WHERE team_id = ? AND player_id = ?')
+        .bind(item.from_team_id, item.player_id).first();
+      if (!still) { valid = false; break; }
+    }
+
+    if (!valid) {
+      await db.prepare(`UPDATE trade_proposals SET status = 'expired' WHERE id = ?`).bind(trade.id).run();
+      continue;
+    }
+
+    const batchOps = (items || []).map(item => {
+      const toTeamId = item.from_team_id === trade.proposing_team_id
+        ? trade.receiving_team_id
+        : trade.proposing_team_id;
+      return db.prepare('UPDATE team_players SET team_id = ? WHERE team_id = ? AND player_id = ?')
+        .bind(toTeamId, item.from_team_id, item.player_id);
+    });
+    batchOps.push(
+      db.prepare(`UPDATE trade_proposals SET status = 'executed' WHERE id = ?`).bind(trade.id)
+    );
+
+    try {
+      await db.batch(batchOps);
+    } catch {
+      await db.prepare(`UPDATE trade_proposals SET status = 'expired' WHERE id = ?`).bind(trade.id).run();
+    }
+  }
+
+  // Expire stale pending trades
+  await db.prepare(`
+    UPDATE trade_proposals SET status = 'expired'
+    WHERE league_id = ? AND status = 'pending' AND expires_at <= ?
+  `).bind(leagueId, now).run();
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1627,6 +2790,38 @@ export default {
           await computeStandings(db, { leagueId: league.id, season: league.season, seasonType: league.season_type || 'playoffs', config: mergeConfig(league.config_json) });
         } catch (err) {
           console.error(`[cron] league ${league.id} standings failed:`, err?.message ?? err);
+        }
+        try {
+          await scoreMatchupsForLeague(db, league.id, league);
+        } catch (err) {
+          console.error(`[cron] league ${league.id} matchup scoring failed:`, err?.message ?? err);
+        }
+        try {
+          await processWaivers(db, league.id);
+        } catch (err) {
+          console.error(`[cron] league ${league.id} waiver processing failed:`, err?.message ?? err);
+        }
+        try {
+          await executeTrades(db, league.id);
+        } catch (err) {
+          console.error(`[cron] league ${league.id} trade execution failed:`, err?.message ?? err);
+        }
+        try {
+          const stalledDraft = await db.prepare(`
+            SELECT id FROM draft_sessions
+            WHERE status = 'active' AND league_id = ?
+              AND pick_deadline < datetime('now', '-2 minutes')
+          `).bind(league.id).first();
+          if (stalledDraft) {
+            const doId = env.DRAFT_ROOM.idFromName(`league-${league.id}`);
+            const stub = env.DRAFT_ROOM.get(doId);
+            await stub.fetch(new Request('https://internal/alarm-reset', {
+              method: 'POST',
+              headers: { 'X-League-Id': String(league.id) },
+            }));
+          }
+        } catch (err) {
+          console.error(`[cron] league ${league.id} stalled draft recovery failed:`, err?.message ?? err);
         }
       }
     } catch (err) {

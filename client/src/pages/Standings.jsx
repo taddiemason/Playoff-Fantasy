@@ -107,6 +107,9 @@ export default function Standings() {
           <div className="st-row st-head">
             <div className="st-rank">#</div>
             <div className="st-team">Team</div>
+            <div className="st-num">W</div>
+            <div className="st-num">L</div>
+            <div className="st-num">T</div>
             <div className="st-num">Active</div>
             <div className="st-num">Dead</div>
             <div className="st-num">Skater</div>
@@ -123,6 +126,9 @@ export default function Standings() {
                 <div className="st-team-name">{t.name}</div>
                 {t.owner && <div className="st-team-owner">{t.owner}</div>}
               </div>
+              <div className="st-num" style={{ fontWeight: 600, color: 'var(--accent)' }}>{t.wins ?? 0}</div>
+              <div className="st-num st-dim">{t.losses ?? 0}</div>
+              <div className="st-num st-dim">{t.ties ?? 0}</div>
               <div className={`st-num ${t.active === 0 && t.total > 0 ? 'st-danger' : ''}`}>{t.active}/{t.total}</div>
               <div className={`st-num ${t.dead > 0 ? 'st-danger' : 'st-dim'}`}>{t.dead}</div>
               <div className="st-num">{t.skaterPts}</div>

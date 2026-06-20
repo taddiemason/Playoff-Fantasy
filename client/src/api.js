@@ -132,6 +132,69 @@ export const api = {
     getInvites: (id) => request(`/api/leagues/${id}/invites`),
     createInvite: (id, opts) => request(`/api/leagues/${id}/invites`, { method: 'POST', body: JSON.stringify(opts || {}) }),
     revokeInvite: (id, inviteId) => request(`/api/leagues/${id}/invites/${inviteId}`, { method: 'DELETE' }),
+
+    // Schedule
+    schedule: {
+      get:      (id) => request(`/api/leagues/${id}/schedule`),
+      generate: (id, startDate, numWeeks) => request(`/api/leagues/${id}/schedule/generate`, {
+        method: 'POST', body: JSON.stringify({ start_date: startDate, num_weeks: numWeeks })
+      }),
+    },
+
+    // Lineup
+    lineup: {
+      get: (id, teamId, periodId) => request(`/api/leagues/${id}/teams/${teamId}/lineup/${periodId}`),
+      set: (id, teamId, periodId, activePlayerIds) => request(`/api/leagues/${id}/teams/${teamId}/lineup/${periodId}`, {
+        method: 'PUT', body: JSON.stringify({ active_player_ids: activePlayerIds })
+      }),
+    },
+
+    // Matchups
+    matchup: {
+      current:  (id) => request(`/api/leagues/${id}/matchups/current`),
+      byPeriod: (id, periodId) => request(`/api/leagues/${id}/matchups/${periodId}`),
+      score:    (id) => request(`/api/leagues/${id}/matchups/score`, { method: 'POST' }),
+    },
+
+    waivers: {
+      list:           (id) => request(`/api/leagues/${id}/waivers`),
+      drop:           (id, playerId) => request(`/api/leagues/${id}/players/${playerId}/drop`, { method: 'POST' }),
+      claim:          (id, droppedPlayerId, dropPlayerId) => request(`/api/leagues/${id}/waivers/claim`, {
+        method: 'POST', body: JSON.stringify({ dropped_player_id: droppedPlayerId, drop_player_id: dropPlayerId ?? null }),
+      }),
+      cancelClaim:    (id, claimId) => request(`/api/leagues/${id}/waivers/claim/${claimId}`, { method: 'DELETE' }),
+      pickup:         (id, droppedPlayerId) => request(`/api/leagues/${id}/free-agents/${droppedPlayerId}/pickup`, { method: 'POST' }),
+      resetPriorities:(id) => request(`/api/leagues/${id}/waivers/reset-priorities`, { method: 'POST' }),
+    },
+
+    trades: {
+      list:    (id) => request(`/api/leagues/${id}/trades`),
+      propose: (id, receivingTeamId, offering, requesting) => request(`/api/leagues/${id}/trades`, {
+        method: 'POST', body: JSON.stringify({ receiving_team_id: receivingTeamId, offering, requesting }),
+      }),
+      accept:  (id, tradeId) => request(`/api/leagues/${id}/trades/${tradeId}/accept`, { method: 'PUT' }),
+      reject:  (id, tradeId) => request(`/api/leagues/${id}/trades/${tradeId}/reject`, { method: 'PUT' }),
+      counter: (id, tradeId, offering, requesting) => request(`/api/leagues/${id}/trades/${tradeId}/counter`, {
+        method: 'PUT', body: JSON.stringify({ offering, requesting }),
+      }),
+      veto:    (id, tradeId) => request(`/api/leagues/${id}/trades/${tradeId}/veto`, { method: 'PUT' }),
+    },
+
+    draft: {
+      getSession: (id) => request(`/api/leagues/${id}/draft/session`),
+      create:     (id) => request(`/api/leagues/${id}/draft/session`, { method: 'POST' }),
+      setOrder:   (id, order) => request(`/api/leagues/${id}/draft/session/order`, {
+        method: 'PUT', body: JSON.stringify({ order }),
+      }),
+      randomize:  (id) => request(`/api/leagues/${id}/draft/session/randomize`, { method: 'POST' }),
+      start:      (id) => request(`/api/leagues/${id}/draft/session/start`, { method: 'POST' }),
+      pause:      (id) => request(`/api/leagues/${id}/draft/session/pause`, { method: 'POST' }),
+      resume:     (id) => request(`/api/leagues/${id}/draft/session/resume`, { method: 'POST' }),
+      connect:    (id) => {
+        const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        return new WebSocket(`${proto}://${window.location.host}/api/leagues/${id}/draft/ws`);
+      },
+    },
   },
 
   // Invite codes (public preview + join)

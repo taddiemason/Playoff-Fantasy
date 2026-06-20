@@ -21,6 +21,7 @@ export default function SwipeStandings({ rows, leagueId }) {
             {t.owner && <div className="swipe-owner">{t.owner}</div>}
             <div className="swipe-points">{t.totalPoints}<span>pts</span></div>
             <div className="swipe-meta">
+              <div><span>{t.wins ?? 0}-{t.losses ?? 0}</span><label>W-L</label></div>
               <div><span>{t.active}/{t.total}</span><label>active</label></div>
               <div><span className={t.dead > 0 ? 'st-danger' : ''}>{t.dead}</span><label>dead</label></div>
               <div><span>{t.skaterPts}</span><label>skater</label></div>

@@ -31,6 +31,22 @@ export default function CommissionerDashboard() {
   const [inviteDays, setInviteDays] = useState('')
   const [creatingInvite, setCreatingInvite] = useState(false)
 
+  // Schedule generation form
+  const [schedStartDate, setSchedStartDate] = useState('')
+  const [schedWeeks, setSchedWeeks] = useState(10)
+  const [schedMsg, setSchedMsg] = useState(null)
+  const [scheduling, setScheduling] = useState(false)
+
+  // Trade veto and waiver priority reset
+  const [pendingTrades, setPendingTrades] = useState([])
+  const [vetoMsg, setVetoMsg] = useState('')
+  const [priorityMsg, setPriorityMsg] = useState('')
+
+  // Draft setup
+  const [draftSession, setDraftSession] = useState(null)
+  const [draftMsg, setDraftMsg] = useState('')
+  const [pickTimer, setPickTimer] = useState(() => league.config?.pick_timer_seconds ?? 90)
+
   const loadMembers = useCallback(() => {
     api.leagues.getMembers(leagueId).then(setMembers).catch((e) => setError(e.message))
   }, [leagueId])
@@ -39,6 +55,16 @@ export default function CommissionerDashboard() {
   }, [leagueId])
 
   useEffect(() => { if (isCommissioner) { loadMembers(); loadInvites() } }, [isCommissioner, loadMembers, loadInvites])
+
+  useEffect(() => {
+    api.leagues.trades.list(leagueId).then(d => {
+      setPendingTrades((d.trades || []).filter(t => t.status === 'accepted'))
+    }).catch(() => {})
+  }, [leagueId])
+
+  useEffect(() => {
+    api.leagues.draft.getSession(leagueId).then(d => setDraftSession(d.session)).catch(() => {})
+  }, [leagueId])
 
   if (!isCommissioner) {
     return (
@@ -90,6 +116,21 @@ export default function CommissionerDashboard() {
     }
   }
 
+  async function generateSchedule(e) {
+    e.preventDefault()
+    if (!schedStartDate || !schedWeeks) return
+    setScheduling(true)
+    setSchedMsg(null)
+    try {
+      const result = await api.leagues.schedule.generate(leagueId, schedStartDate, Number(schedWeeks))
+      setSchedMsg({ type: 'success', text: `Schedule created: ${result.periods.length} weeks` })
+    } catch (err) {
+      setSchedMsg({ type: 'error', text: err.message })
+    } finally {
+      setScheduling(false)
+    }
+  }
+
   async function handleRemoveMember(m) {
     if (!confirm(`Remove ${m.username} from the league? Their teams in this league will be deleted.`)) return
     try { await api.leagues.removeMember(leagueId, m.user_id); loadMembers() }
@@ -121,6 +162,37 @@ export default function CommissionerDashboard() {
     navigator.clipboard?.writeText(inviteLink(code))
     setCopied(label)
     setTimeout(() => setCopied(''), 2000)
+  }
+
+  async function vetoTrade(tradeId) {
+    try {
+      await api.leagues.trades.veto(leagueId, tradeId)
+      setVetoMsg('Trade vetoed.')
+      setPendingTrades(prev => prev.filter(t => t.id !== tradeId))
+    } catch (e) { setVetoMsg(e.message) }
+  }
+
+  async function resetPriorities() {
+    try {
+      await api.leagues.waivers.resetPriorities(leagueId)
+      setPriorityMsg('Waiver priorities reset to 0 for all teams.')
+    } catch (e) { setPriorityMsg(e.message) }
+  }
+
+  async function createDraftSession() {
+    try {
+      await api.leagues.draft.create(leagueId)
+      setDraftMsg('Draft session created. Go to the Draft page to set order and start.')
+      const d = await api.leagues.draft.getSession(leagueId)
+      setDraftSession(d.session)
+    } catch (e) { setDraftMsg(e.message) }
+  }
+
+  async function savePickTimer() {
+    try {
+      await api.leagues.update(leagueId, { pick_timer_seconds: Number(pickTimer) })
+      setDraftMsg('Pick timer saved.')
+    } catch (e) { setDraftMsg(e.message) }
   }
 
   return (
@@ -236,6 +308,103 @@ export default function CommissionerDashboard() {
               </div>
             </div>
           ))
+        )}
+      </div>
+
+      {/* ── Schedule Generation ── */}
+      <section className="card" style={{ marginTop: '2rem' }}>
+        <h2 className="section-title">Season Schedule</h2>
+        <form onSubmit={generateSchedule} className="form-stack">
+          <div className="form-row">
+            <label className="form-label">Start Date</label>
+            <input
+              type="date"
+              className="input"
+              value={schedStartDate}
+              onChange={e => setSchedStartDate(e.target.value)}
+              required
+            />
+          </div>
+          <div className="form-row">
+            <label className="form-label">Number of Weeks</label>
+            <input
+              type="number"
+              className="input"
+              min={1}
+              max={52}
+              value={schedWeeks}
+              onChange={e => setSchedWeeks(e.target.value)}
+              required
+            />
+          </div>
+          {schedMsg && (
+            <div className={`alert alert-${schedMsg.type === 'success' ? 'success' : 'error'}`}>
+              {schedMsg.text}
+            </div>
+          )}
+          <button type="submit" className="btn btn-primary" disabled={scheduling}>
+            {scheduling ? 'Generating…' : 'Generate Schedule'}
+          </button>
+          <p className="hint">Regenerating overwrites the existing schedule.</p>
+        </form>
+      </section>
+
+      {/* ── Trade Veto Queue ── */}
+      <section style={{ marginTop: '2rem' }}>
+        <h3>Trade Veto Queue</h3>
+        {vetoMsg && <div className="alert">{vetoMsg}</div>}
+        {pendingTrades.length === 0
+          ? <p className="st-dim">No accepted trades pending veto review.</p>
+          : pendingTrades.map(t => {
+              const offering   = (t.items || []).filter(i => i.from_team_id === t.proposing_team_id)
+              const requesting = (t.items || []).filter(i => i.from_team_id === t.receiving_team_id)
+              return (
+                <div key={t.id} style={{ padding: '0.75rem 0', borderBottom: '1px solid var(--border)' }}>
+                  <div><strong>{t.proposing_team_name}</strong>: {offering.map(i => i.player_name).join(', ')}</div>
+                  <div>For <strong>{t.receiving_team_name}</strong>: {requesting.map(i => i.player_name).join(', ')}</div>
+                  <div className="st-dim" style={{ fontSize: '0.8rem' }}>
+                    Veto deadline: {new Date(t.veto_deadline).toLocaleString()}
+                  </div>
+                  <button onClick={() => vetoTrade(t.id)} style={{ marginTop: '0.5rem' }}>Veto Trade</button>
+                </div>
+              )
+            })
+        }
+      </section>
+
+      <section style={{ marginTop: '2rem' }}>
+        <h3>Waiver Priorities</h3>
+        {priorityMsg && <div className="alert">{priorityMsg}</div>}
+        <p className="st-dim">Resets all team waiver priorities to 0 (equal standing).</p>
+        <button onClick={resetPriorities}>Reset Waiver Priorities</button>
+      </section>
+
+      {/* ── Draft Setup ── */}
+      <div style={{ marginTop: '2rem', borderTop: '1px solid #333', paddingTop: '1rem' }}>
+        <h3>Draft Setup</h3>
+        {draftMsg && <p className="alert">{draftMsg}</p>}
+
+        <div style={{ marginBottom: '1rem' }}>
+          <label>Pick Timer (seconds)
+            <input
+              type="number"
+              min={15}
+              max={300}
+              value={pickTimer}
+              onChange={e => setPickTimer(e.target.value)}
+              style={{ marginLeft: '0.5rem', width: 70 }}
+            />
+          </label>
+          <button onClick={savePickTimer} style={{ marginLeft: '0.5rem' }}>Save Timer</button>
+        </div>
+
+        {!draftSession ? (
+          <button onClick={createDraftSession}>Create Draft Session</button>
+        ) : (
+          <p className="st-dim">
+            Draft session exists (status: <strong>{draftSession.status}</strong>).{' '}
+            <a href={`/leagues/${leagueId}/draft`}>Go to Draft Room →</a>
+          </p>
         )}
       </div>
 
