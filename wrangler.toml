@@ -37,3 +37,11 @@ new_classes = ["DraftRoom"]
 [[migrations]]
 tag = "v2"
 new_classes = ["AuctionRoom"]
+
+[[durable_objects.bindings]]
+name = "CHAT_ROOM"
+class_name = "ChatRoom"
+
+[[migrations]]
+tag = "v3"
+new_classes = ["ChatRoom"]
