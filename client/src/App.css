@@ -505,6 +505,19 @@ button { cursor: pointer; font-family: inherit; }
 .player-pos-badge.d { background: rgba(124, 58, 237, 0.12); color: var(--defense); }
 .player-pos-badge.g { background: rgba(16, 185, 129, 0.12); color: var(--goalie); }
 
+.player-status-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
 .player-stats-mini {
   display: flex;
   gap: 6px;
