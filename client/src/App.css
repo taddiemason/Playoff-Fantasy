@@ -1655,3 +1655,57 @@ textarea.form-input { resize: vertical; font-family: inherit; }
   vertical-align: middle;
   margin-bottom: 2px;
 }
+
+/* ── Player Detail Page ─────────────────────────── */
+.player-detail-page { max-width: 680px; margin: 0 auto; padding: 0 0 48px; }
+
+.player-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+  margin: 12px 0;
+}
+.player-detail-crest {
+  position: absolute; right: 12px; top: 12px;
+  width: 52px; height: 52px; opacity: 0.12; pointer-events: none;
+}
+.player-detail-headshot {
+  width: 72px; height: 72px; border-radius: 50%;
+  object-fit: cover; border: 2px solid var(--border);
+  flex-shrink: 0;
+}
+.player-detail-name {
+  font-size: 1.3rem; font-weight: 700; color: var(--text);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.player-detail-injury-banner {
+  margin: 0 0 12px;
+}
+.player-detail-section { margin-top: 20px; }
+.player-detail-section-title {
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+  margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.player-detail-stat-grid {
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+.player-detail-gamelog {
+  width: 100%; border-collapse: collapse; font-size: 0.875rem;
+}
+.player-detail-gamelog th, .player-detail-gamelog td {
+  padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border);
+}
+.player-detail-gamelog th { color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
+.player-detail-gamelog tr:last-child td { border-bottom: none; }
+.player-detail-news { display: flex; flex-direction: column; gap: 12px; }
+.player-detail-news-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px;
+}
+.player-detail-news-title { font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.player-detail-news-meta { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 6px; }
+.player-detail-news-body { font-size: 0.875rem; color: var(--text-dim); line-height: 1.5; }

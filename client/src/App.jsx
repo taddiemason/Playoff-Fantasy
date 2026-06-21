@@ -12,6 +12,7 @@ import Standings from './pages/Standings.jsx'
 import LeagueRules from './pages/LeagueRules.jsx'
 import AddPlayers from './pages/AddPlayers.jsx'
 import PlayerExplorer from './pages/PlayerExplorer.jsx'
+import PlayerDetailPage from './pages/PlayerDetailPage.jsx'
 import CommissionerDashboard from './pages/CommissionerDashboard.jsx'
 import JoinLeague from './pages/JoinLeague.jsx'
 import SchedulePage from './pages/SchedulePage.jsx'
@@ -52,6 +53,7 @@ export default function App() {
             <Route path="standings" element={<Standings />} />
             <Route path="rules" element={<LeagueRules />} />
             <Route path="players" element={<PlayerExplorer />} />
+            <Route path="players/:playerId" element={<PlayerDetailPage />} />
             <Route path="add-players" element={<AddPlayers />} />
             <Route path="admin" element={<CommissionerDashboard />} />
             <Route path="teams/:teamId" element={<TeamDetail />} />

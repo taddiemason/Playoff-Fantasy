@@ -125,6 +125,7 @@ export const api = {
     // Player Explorer
     explorer: (id) => request(`/api/leagues/${id}/players`),
     player: (id, playerId) => request(`/api/leagues/${id}/players/${playerId}`),
+    injuries: (id) => request(`/api/leagues/${id}/injuries`),
 
     // Commissioner
     getMembers: (id) => request(`/api/leagues/${id}/members`),
