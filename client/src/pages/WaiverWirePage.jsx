@@ -1,8 +1,9 @@
 // client/src/pages/WaiverWirePage.jsx
 import { useState, useEffect } from 'react'
-import { useParams, useOutletContext } from 'react-router-dom'
+import { useParams, useOutletContext, Link } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { api } from '../api.js'
+import PlayerStatusBadge from '../components/PlayerStatusBadge.jsx'
 
 export default function WaiverWirePage() {
   const { leagueId } = useParams()
@@ -88,7 +89,11 @@ export default function WaiverWirePage() {
               return (
                 <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.5rem 0', borderBottom: '1px solid var(--border)' }}>
                   <div>
-                    <div>{p.player_name} <span className="st-dim">({meta.position})</span></div>
+                    <div>
+                      <Link to={`/leagues/${leagueId}/players/${p.player_id}`}>{p.player_name}</Link>
+                      {' '}<span className="st-dim">({meta.position})</span>
+                      <PlayerStatusBadge injuryStatus={p.injuryStatus || ''} injuryDescription={p.injuryDescription || ''} />
+                    </div>
                     <div className="st-dim" style={{ fontSize: '0.8rem' }}>Deadline: {new Date(p.waiver_deadline).toLocaleString()}</div>
                   </div>
                   <button onClick={() => { setClaimTarget(p); setDropPlayerId(''); setMsg('') }}>Claim</button>
@@ -106,7 +111,11 @@ export default function WaiverWirePage() {
               const meta = JSON.parse(p.player_meta_json || '{}')
               return (
                 <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.5rem 0', borderBottom: '1px solid var(--border)' }}>
-                  <span>{p.player_name} <span className="st-dim">({meta.position})</span></span>
+                  <span>
+                    <Link to={`/leagues/${leagueId}/players/${p.player_id}`}>{p.player_name}</Link>
+                    {' '}<span className="st-dim">({meta.position})</span>
+                    <PlayerStatusBadge injuryStatus={p.injuryStatus || ''} injuryDescription={p.injuryDescription || ''} />
+                  </span>
                   <button onClick={() => handlePickup(p)}>Pick Up</button>
                 </div>
               )
@@ -117,7 +126,7 @@ export default function WaiverWirePage() {
       {claimTarget && (
         <div className="modal-overlay">
           <div className="modal">
-            <h3>Claim {claimTarget.player_name}</h3>
+            <h3>Claim {claimTarget.player_name} <PlayerStatusBadge injuryStatus={claimTarget.injuryStatus || ''} injuryDescription={claimTarget.injuryDescription || ''} /></h3>
             <p>Optionally drop a player to make room:</p>
             <select value={dropPlayerId} onChange={e => setDropPlayerId(e.target.value)}>
               <option value="">— Keep roster as-is —</option>

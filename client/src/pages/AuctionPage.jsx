@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useOutletContext } from 'react-router-dom';
 import { api } from '../api';
 import { useAuctionSocket } from '../hooks/useAuctionSocket';
+import PlayerStatusBadge from '../components/PlayerStatusBadge.jsx';
 
 function PreAuctionLobby({ leagueId, initialSession, isCommissioner, onStart }) {
   const [draftOrder, setDraftOrder] = useState(
@@ -135,7 +136,7 @@ function NominationPanel({ nomination, draftOrder }) {
   );
 }
 
-function NominatePanel({ available, myBudget, myRoster, capsF, capsD, capsG, send }) {
+function NominatePanel({ available, myBudget, myRoster, capsF, capsD, capsG, send, injuryMap }) {
   const [search, setSearch] = useState('');
   const [openingBid, setOpeningBid] = useState(1);
 
@@ -182,6 +183,10 @@ function NominatePanel({ available, myBudget, myRoster, capsF, capsD, capsG, sen
             <span style={{ flex: 1, fontSize: '0.85rem' }}>
               <span style={{ color: '#888', fontSize: '0.75rem', marginRight: 4 }}>{p.position}</span>
               {p.playerName}
+              <PlayerStatusBadge
+                injuryStatus={(injuryMap || {})[parseInt(p.playerId)]?.injuryStatus || ''}
+                injuryDescription={(injuryMap || {})[parseInt(p.playerId)]?.injuryDescription || ''}
+              />
             </span>
             <button onClick={() => nominate(p)} style={{ fontSize: '0.75rem', padding: '2px 8px' }}>
               Nominate
@@ -244,6 +249,7 @@ export default function AuctionPage() {
   const [isCommissioner, setIsCommissioner] = useState(false);
   const [myTeamId, setMyTeamId] = useState(null);
   const [caps, setCaps] = useState({ F: 10, D: 5, G: 3 });
+  const [injuryMap, setInjuryMap] = useState({});
   const { state: wsState, send, connected, error: wsError } = useAuctionSocket(leagueId);
 
   useEffect(() => {
@@ -267,6 +273,8 @@ export default function AuctionPage() {
       setLoading(false);
     }
     load();
+    fetch(`/api/leagues/${leagueId}/injuries`, { credentials: 'include' })
+      .then(r => r.json()).then(d => setInjuryMap(d.injuries || {})).catch(() => {});
   }, [leagueId, user]);
 
   if (loading) return <div className="page-content"><p>Loading auction…</p></div>;
@@ -368,6 +376,7 @@ export default function AuctionPage() {
                 myRoster={myRoster}
                 capsF={capsF} capsD={capsD} capsG={capsG}
                 send={send}
+                injuryMap={injuryMap}
               />
             </div>
           )}

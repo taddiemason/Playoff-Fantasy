@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useOutletContext, Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth/AuthContext.jsx'
+import PlayerStatusBadge from '../components/PlayerStatusBadge.jsx'
 
 const POS_LABEL = { F: 'Forwards', D: 'Defense', G: 'Goalies' }
 
@@ -138,7 +139,11 @@ export default function LineupPage() {
                 }}
               >
                 {p.headshot_url && <img src={p.headshot_url} alt="" style={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover' }} />}
-                <span style={{ flex: 1 }}>{p.player_name} <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>({p.nhl_team})</span></span>
+                <span style={{ flex: 1 }}>
+                  <Link to={`/leagues/${leagueId}/players/${p.player_id}`} onClick={e => e.stopPropagation()}>{p.player_name}</Link>
+                  {' '}<span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>({p.nhl_team})</span>
+                  <PlayerStatusBadge injuryStatus={p.injuryStatus || ''} injuryDescription={p.injuryDescription || ''} />
+                </span>
                 <span style={{
                   padding: '0.2rem 0.6rem', borderRadius: 4, fontSize: '0.75rem', fontWeight: 600,
                   background: isActive ? 'var(--accent)' : 'var(--bg-input)',

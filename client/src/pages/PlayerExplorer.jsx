@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useOutletContext, Link } from 'react-router-dom'
 import { api } from '../api.js'
+import PlayerStatusBadge from '../components/PlayerStatusBadge.jsx'
 
 const POS_LABEL = { F: 'Forward', D: 'Defenseman', G: 'Goalie' }
 
@@ -42,7 +43,10 @@ function PlayerDetail({ leagueId, detail }) {
           ? <img src={player.headshot_url} alt="" className="explorer-headshot" onError={() => setImgFail(true)} />
           : <div className="explorer-headshot player-headshot-placeholder">{player.position}</div>}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="explorer-name">{player.name}</div>
+          <div className="explorer-name">
+            <Link to={`/leagues/${leagueId}/players/${player.playerId}`}>{player.name}</Link>
+            <PlayerStatusBadge injuryStatus={player.injuryStatus || ''} injuryDescription={player.injuryDescription || ''} />
+          </div>
           <div className="player-meta">
             {player.nhl_team && <span className="player-team-badge">{player.nhl_team}</span>}
             <span className={`player-pos-badge ${player.position.toLowerCase()}`}>{player.position_detail || POS_LABEL[player.position]}</span>
@@ -169,6 +173,7 @@ export default function PlayerExplorer() {
                 <span className={`player-pos-badge ${p.position.toLowerCase()}`}>{p.position}</span>
                 <span className="explorer-cell-name">{p.name}</span>
                 {p.nhl_team && <span className="player-team-badge">{p.nhl_team}</span>}
+                <PlayerStatusBadge injuryStatus={p.injuryStatus || ''} injuryDescription={p.injuryDescription || ''} />
               </div>
               <div className="st-num">{p.ownerCount}</div>
               <div className="st-num">{p.ownershipPct}%</div>

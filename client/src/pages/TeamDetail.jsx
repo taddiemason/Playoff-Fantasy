@@ -3,11 +3,12 @@ import { useParams, useNavigate, useOutletContext, Link } from 'react-router-dom
 import { api } from '../api.js'
 import { useAuth } from '../auth/AuthContext.jsx'
 import AddPlayerModal from '../components/AddPlayerModal.jsx'
+import PlayerStatusBadge from '../components/PlayerStatusBadge.jsx'
 
 const POS_ICON = { F: 'F', D: 'D', G: 'G' }
 const POS_CLASS = { F: 'forwards', D: 'defense', G: 'goalies' }
 
-function PlayerRow({ player, onRemove, eliminated, canEdit }) {
+function PlayerRow({ player, onRemove, eliminated, canEdit, leagueId, injuryStatus, injuryDescription }) {
   const [showBreakdown, setShowBreakdown] = useState(false)
   const [removing, setRemoving] = useState(false)
   const { stats, breakdown, points, position, position_detail } = player
@@ -33,7 +34,10 @@ function PlayerRow({ player, onRemove, eliminated, canEdit }) {
           : <div className="player-headshot-placeholder">{POS_ICON[position]}</div>}
 
         <div className="player-info">
-          <div className="player-name">{player.player_name}</div>
+          <div className="player-name">
+              <Link to={`/leagues/${leagueId}/players/${player.player_id}`}>{player.player_name}</Link>
+              <PlayerStatusBadge injuryStatus={injuryStatus} injuryDescription={injuryDescription} />
+            </div>
           <div className="player-meta">
             {player.nhl_team && <span className="player-team-badge">{player.nhl_team}</span>}
             <span className={`player-pos-badge ${posClass}`}>{position_detail || position}</span>
@@ -128,6 +132,7 @@ export default function TeamDetail() {
   const [eliminatedTeams, setEliminatedTeams] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [injuryMap, setInjuryMap] = useState({})
   const [showAddPlayer, setShowAddPlayer] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [editingTiebreaker, setEditingTiebreaker] = useState(false)
@@ -140,7 +145,10 @@ export default function TeamDetail() {
   const fetchTeam = useCallback(async () => {
     setLoading(true)
     try {
-      const standingsData = await api.leagues.getStandings(leagueId)
+      const [standingsData, injuredPlayers] = await Promise.all([
+        api.leagues.getStandings(leagueId),
+        api.leagues.getPlayers(leagueId, teamId),
+      ])
       const found = standingsData.standings?.find((t) => t.id === parseInt(teamId))
       if (found) {
         setTeamData({ team: found, poolGoalieCount: standingsData.poolGoalieCount })
@@ -148,6 +156,11 @@ export default function TeamDetail() {
       } else {
         setError('Team not found')
       }
+      const map = {}
+      for (const p of (injuredPlayers || [])) {
+        map[p.player_id] = { injuryStatus: p.injuryStatus || '', injuryDescription: p.injuryDescription || '' }
+      }
+      setInjuryMap(map)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -296,6 +309,9 @@ export default function TeamDetail() {
                 onRemove={handleRemovePlayer}
                 eliminated={eliminatedSet.has((player.nhl_team || '').trim().toUpperCase())}
                 canEdit={canEdit}
+                leagueId={leagueId}
+                injuryStatus={injuryMap[player.player_id]?.injuryStatus || ''}
+                injuryDescription={injuryMap[player.player_id]?.injuryDescription || ''}
               />
             ))
           )}

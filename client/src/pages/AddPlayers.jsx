@@ -3,6 +3,7 @@ import { useParams, useOutletContext, Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth/AuthContext.jsx'
 import PlayerSearch from '../components/PlayerSearch.jsx'
+import PlayerStatusBadge from '../components/PlayerStatusBadge.jsx'
 
 export default function AddPlayers() {
   const { leagueId } = useParams()
@@ -79,7 +80,22 @@ export default function AddPlayers() {
           {loadingRoster ? (
             <div className="loading-state"><span className="loading-spinner"></span> Loading roster…</div>
           ) : (
-            <PlayerSearch roster={roster} caps={league.config.roster} onAdd={handleAdd} />
+            <>
+              <PlayerSearch roster={roster} caps={league.config.roster} onAdd={handleAdd} />
+              {roster.length > 0 && (
+                <div style={{ marginTop: 24 }}>
+                  <div className="dashboard-section-title">Current Roster</div>
+                  {roster.map((p) => (
+                    <div key={p.player_id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                      <span className={`player-pos-badge ${(p.position || '').toLowerCase()}`}>{p.position}</span>
+                      <Link to={`/leagues/${leagueId}/players/${p.player_id}`}>{p.player_name}</Link>
+                      {p.nhl_team && <span className="player-team-badge">{p.nhl_team}</span>}
+                      <PlayerStatusBadge injuryStatus={p.injuryStatus || ''} injuryDescription={p.injuryDescription || ''} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </>
       )}

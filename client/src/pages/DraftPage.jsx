@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { useOutletContext } from 'react-router-dom';
 import { api } from '../api';
 import { useDraftSocket } from '../hooks/useDraftSocket';
+import PlayerStatusBadge from '../components/PlayerStatusBadge.jsx';
 
 function PreDraftLobby({ leagueId, initialSession, isCommissioner, onStart }) {
   const [session, setSession] = useState(initialSession);
@@ -186,7 +187,7 @@ function DraftBoardGrid({ draftOrder, picks, currentPick, totalPicks, currentTea
   );
 }
 
-function DraftAvailablePlayers({ available, myQueue, currentTeamId, myTeamId, status, send }) {
+function DraftAvailablePlayers({ available, myQueue, currentTeamId, myTeamId, status, send, injuryMap }) {
   const [tab, setTab] = useState('ALL');
   const [search, setSearch] = useState('');
   const queuedIds = new Set((myQueue || []).map(p => p.playerId));
@@ -223,6 +224,10 @@ function DraftAvailablePlayers({ available, myQueue, currentTeamId, myTeamId, st
               <span style={{ color: '#888', fontSize: '0.75rem', marginRight: 4 }}>{p.position}</span>
               {p.playerName}
               <span style={{ color: '#888', fontSize: '0.75rem', marginLeft: 4 }}>{p.nhlTeam}</span>
+              <PlayerStatusBadge
+                injuryStatus={injuryMap[parseInt(p.playerId)]?.injuryStatus || ''}
+                injuryDescription={injuryMap[parseInt(p.playerId)]?.injuryDescription || ''}
+              />
             </span>
             <button
               disabled={queuedIds.has(p.playerId)}
@@ -301,6 +306,7 @@ export default function DraftPage() {
   const [initialData, setInitialData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isCommissioner, setIsCommissioner] = useState(false);
+  const [injuryMap, setInjuryMap] = useState({});
   const { state: wsState, send, connected, error: wsError } = useDraftSocket(leagueId);
 
   useEffect(() => {
@@ -320,6 +326,8 @@ export default function DraftPage() {
       setLoading(false);
     }
     load();
+    fetch(`/api/leagues/${leagueId}/injuries`, { credentials: 'include' })
+      .then(r => r.json()).then(d => setInjuryMap(d.injuries || {})).catch(() => {});
   }, [leagueId, user]);
 
   const [myTeamId2, setMyTeamId2] = useState(null);
@@ -411,6 +419,7 @@ export default function DraftPage() {
           myTeamId={myTeamId2}
           status={liveState.status}
           send={send}
+          injuryMap={injuryMap}
         />
         <DraftQueuePanel
           myQueue={liveState.myQueue}
