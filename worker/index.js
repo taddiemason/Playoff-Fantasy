@@ -70,6 +70,57 @@ async function syncNhlRosters(db) {
   return players.length;
 }
 
+async function syncInjuries(db) {
+  const res = await fetch(`${NHL_BASE}/injury`, {
+    headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
+  });
+  if (!res.ok) throw new Error(`Injury endpoint returned ${res.status}`);
+  const data = await res.json();
+  const injured = Array.isArray(data) ? data : (data.injured || []);
+  // Clear all injury columns — if fetch failed we threw above, so we never reach here on error
+  await db.prepare(`UPDATE nhl_players SET injury_status = '', injury_description = ''`).run();
+  // Write injured players in D1 batches of 100
+  for (let i = 0; i < injured.length; i += 100) {
+    const batch = injured.slice(i, i + 100);
+    await db.batch(batch.map(p => {
+      const playerId = p.playerId || p.id;
+      const status = p.status || '';
+      const description = p.injuryDescription || p.longTermInjuryNote || p.description || '';
+      return db.prepare(
+        `UPDATE nhl_players SET injury_status = ?, injury_description = ? WHERE player_id = ?`
+      ).bind(status, description, playerId);
+    }));
+  }
+  console.log(`[cron] syncInjuries: ${injured.length} injured players written`);
+  return injured.length;
+}
+
+async function refreshRosteredPlayerLandings(db) {
+  const { results } = await db
+    .prepare('SELECT DISTINCT player_id FROM team_players')
+    .all();
+  const playerIds = (results || []).map(r => r.player_id);
+  if (!playerIds.length) return;
+  const now = new Date().toISOString();
+  // Process in batches of 20 concurrent fetches
+  for (let i = 0; i < playerIds.length; i += 20) {
+    const batch = playerIds.slice(i, i + 20);
+    await Promise.allSettled(batch.map(async (playerId) => {
+      try {
+        const res = await fetch(`${NHL_BASE}/player/${playerId}/landing`, {
+          headers: { 'User-Agent': 'PlayoffFantasy/1.0 (Cloudflare Worker)' }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        await savePlayerLandingSnapshot(db, playerId, data, now);
+      } catch (err) {
+        console.error(`[cron] landing refresh failed for player ${playerId}:`, err?.message);
+      }
+    }));
+  }
+  console.log(`[cron] refreshRosteredPlayerLandings: refreshed ${playerIds.length} players`);
+}
+
 // Standings state is keyed per league so leagues never clobber each other's
 // goalie pools or cached results. The key is the league id (or '__global__'
 // for the legacy single-pool standings endpoint).
@@ -3595,6 +3646,20 @@ export default {
       await syncNhlRosters(db);
     } catch (err) {
       console.error('[cron] NHL roster sync failed:', err?.message ?? err);
+    }
+
+    // Sync player injury status from NHL injury endpoint
+    try {
+      await syncInjuries(db);
+    } catch (err) {
+      console.error('[cron] syncInjuries failed:', err?.message ?? err);
+    }
+
+    // Refresh landing snapshots for all rostered players
+    try {
+      await refreshRosteredPlayerLandings(db);
+    } catch (err) {
+      console.error('[cron] refreshRosteredPlayerLandings failed:', err?.message ?? err);
     }
 
     // Also recompute the legacy global pool (covers any not-yet-migrated teams).
