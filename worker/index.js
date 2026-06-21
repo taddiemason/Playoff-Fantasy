@@ -560,6 +560,26 @@ async function getPlayerLandingSnapshotMap(db, playerIds) {
   );
 }
 
+async function getInjuryMap(db, playerIds) {
+  if (!playerIds || !playerIds.length) return {};
+  const placeholders = playerIds.map(() => '?').join(',');
+  const { results } = await db
+    .prepare(
+      `SELECT player_id, injury_status, injury_description
+       FROM nhl_players WHERE player_id IN (${placeholders})`
+    )
+    .bind(...playerIds)
+    .all();
+  const map = {};
+  for (const r of (results || [])) {
+    map[r.player_id] = {
+      injuryStatus: r.injury_status || '',
+      injuryDescription: r.injury_description || '',
+    };
+  }
+  return map;
+}
+
 async function savePlayerLandingSnapshot(db, playerId, landingData, fetchedAt) {
   const headshot = normalizeHeadshotUrl(landingData?.headshot);
   await db
@@ -1142,7 +1162,13 @@ async function handleApi(request, env, pathname) {
 
     const active = players.filter(p => activeMap.get(p.player_id));
     const bench  = players.filter(p => !activeMap.get(p.player_id));
-    return json({ active, bench, slots, locked });
+    const injuryMap = await getInjuryMap(db, players.map(p => p.player_id));
+    const addInjury = p => ({
+      ...p,
+      injuryStatus: injuryMap[p.player_id]?.injuryStatus || '',
+      injuryDescription: injuryMap[p.player_id]?.injuryDescription || '',
+    });
+    return json({ active: active.map(addInjury), bench: bench.map(addInjury), slots, locked });
   }
 
   if (lineupMatch && request.method === 'PUT') {
@@ -2218,9 +2244,12 @@ async function handleApi(request, env, pathname) {
     if (ctx.error) return ctx.error;
 
     const { results: players } = await db.prepare(`
-      SELECT dp.*, t.name AS dropped_by_team_name
+      SELECT dp.*, t.name AS dropped_by_team_name,
+             COALESCE(np.injury_status, '') AS injury_status,
+             COALESCE(np.injury_description, '') AS injury_description
       FROM dropped_players dp
       JOIN teams t ON t.id = dp.dropped_by_team_id
+      LEFT JOIN nhl_players np ON np.player_id = dp.player_id
       WHERE dp.league_id = ? AND dp.status IN ('waivers', 'free_agent')
       ORDER BY dp.dropped_at DESC
     `).bind(leagueId).all();
@@ -2233,7 +2262,12 @@ async function handleApi(request, env, pathname) {
           .bind(myTeam.id).all()).results || []
       : [];
 
-    return json({ players: players || [], myClaims });
+    const mappedPlayers = (players || []).map(p => ({
+      ...p,
+      injuryStatus: p.injury_status || '',
+      injuryDescription: p.injury_description || '',
+    }));
+    return json({ players: mappedPlayers, myClaims });
   }
 
   const waiverClaimMatch = pathname.match(/^\/api\/leagues\/(\d+)\/waivers\/claim$/);
@@ -2590,7 +2624,13 @@ async function handleApi(request, env, pathname) {
     const teamId = parseId(lgPlayersMatch[2]);
     const ctx = await loadLeagueContext(db, request, leagueId);
     if (ctx.error) return ctx.error;
-    return json(await getTeamPlayers(db, teamId));
+    const players = await getTeamPlayers(db, teamId);
+    const injuryMap = await getInjuryMap(db, players.map(p => p.player_id));
+    return json(players.map(p => ({
+      ...p,
+      injuryStatus: injuryMap[p.player_id]?.injuryStatus || '',
+      injuryDescription: injuryMap[p.player_id]?.injuryDescription || '',
+    })));
   }
 
   if (lgPlayersMatch && request.method === 'POST') {
@@ -2803,6 +2843,25 @@ async function handleApi(request, env, pathname) {
     return json({ league: { id: league.id, name: league.name }, alreadyMember: false });
   }
 
+  // ── League Injuries ──────────────────────────────────────────────────────────
+  const leagueInjuriesMatch = pathname.match(/^\/api\/leagues\/(\d+)\/injuries$/);
+  if (leagueInjuriesMatch && request.method === 'GET') {
+    const leagueId = parseId(leagueInjuriesMatch[1]);
+    const ctx = await loadLeagueContext(db, request, leagueId);
+    if (ctx.error) return ctx.error;
+    const { results } = await db
+      .prepare(`SELECT player_id, injury_status, injury_description FROM nhl_players WHERE injury_status != ''`)
+      .all();
+    const injuries = {};
+    for (const r of (results || [])) {
+      injuries[r.player_id] = {
+        injuryStatus: r.injury_status,
+        injuryDescription: r.injury_description,
+      };
+    }
+    return json({ injuries });
+  }
+
   // ── Player Explorer ─────────────────────────────────────────────────────────
   const explorerMatch = pathname.match(/^\/api\/leagues\/(\d+)\/players$/);
   if (explorerMatch && request.method === 'GET') {
@@ -2829,8 +2888,16 @@ async function handleApi(request, env, pathname) {
         e.owners.push({ teamId: team.id, teamName: team.name, owner: team.owner });
       }
     }
+    const playerIdList = [...map.keys()];
+    const injuryMap = await getInjuryMap(db, playerIdList);
     const players = [...map.values()]
-      .map((p) => ({ ...p, ownerCount: p.owners.length, ownershipPct: totalTeams ? Math.round((p.owners.length / totalTeams) * 100) : 0 }))
+      .map((p) => ({
+        ...p,
+        ownerCount: p.owners.length,
+        ownershipPct: totalTeams ? Math.round((p.owners.length / totalTeams) * 100) : 0,
+        injuryStatus: injuryMap[p.playerId]?.injuryStatus || '',
+        injuryDescription: injuryMap[p.playerId]?.injuryDescription || '',
+      }))
       .sort((a, b) => (b.points || 0) - (a.points || 0));
     return json({ players, totalTeams, season: standings.season });
   }
@@ -2889,11 +2956,35 @@ async function handleApi(request, env, pathname) {
     }
 
     const eliminated = elimSet.has((player.nhl_team || '').trim().toUpperCase());
+
+    // Fetch injury + landing data in parallel
+    const [nhlRow, landingSnap] = await Promise.all([
+      db.prepare('SELECT injury_status, injury_description FROM nhl_players WHERE player_id = ?')
+        .bind(playerId).first(),
+      db.prepare('SELECT landing_json FROM player_landing_snapshots WHERE player_id = ?')
+        .bind(playerId).first(),
+    ]);
+    const injuryStatus = nhlRow?.injury_status || '';
+    const injuryDescription = nhlRow?.injury_description || '';
+
+    let featuredStats = null, gameLog = null, spotlightStories = null;
+    if (landingSnap?.landing_json) {
+      try {
+        const landing = JSON.parse(landingSnap.landing_json);
+        featuredStats = landing.featuredStats || null;
+        gameLog = (landing.gameLog || []).slice(0, 5);
+        spotlightStories = landing.spotlightStories || null;
+      } catch {}
+    }
+
     return json({
-      player, stats, points, breakdown, partial,
+      player: { ...player, injuryStatus, injuryDescription },
+      stats, points, breakdown, partial,
       owners, ownerCount: owners.length,
       ownershipPct: totalTeams ? Math.round((owners.length / totalTeams) * 100) : 0,
       totalTeams, eliminated, season,
+      injuryStatus, injuryDescription,
+      featuredStats, gameLog, spotlightStories,
     });
   }
 
