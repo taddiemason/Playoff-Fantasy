@@ -2262,10 +2262,10 @@ async function handleApi(request, env, pathname) {
           .bind(myTeam.id).all()).results || []
       : [];
 
-    const mappedPlayers = (players || []).map(p => ({
-      ...p,
-      injuryStatus: p.injury_status || '',
-      injuryDescription: p.injury_description || '',
+    const mappedPlayers = (players || []).map(({ injury_status, injury_description, ...rest }) => ({
+      ...rest,
+      injuryStatus: injury_status || '',
+      injuryDescription: injury_description || '',
     }));
     return json({ players: mappedPlayers, myClaims });
   }
@@ -2895,8 +2895,8 @@ async function handleApi(request, env, pathname) {
         ...p,
         ownerCount: p.owners.length,
         ownershipPct: totalTeams ? Math.round((p.owners.length / totalTeams) * 100) : 0,
-        injuryStatus: injuryMap[p.playerId]?.injuryStatus || '',
-        injuryDescription: injuryMap[p.playerId]?.injuryDescription || '',
+        injuryStatus: injuryMap[p.player_id]?.injuryStatus || '',
+        injuryDescription: injuryMap[p.player_id]?.injuryDescription || '',
       }))
       .sort((a, b) => (b.points || 0) - (a.points || 0));
     return json({ players, totalTeams, season: standings.season });
