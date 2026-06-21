@@ -2895,8 +2895,8 @@ async function handleApi(request, env, pathname) {
         ...p,
         ownerCount: p.owners.length,
         ownershipPct: totalTeams ? Math.round((p.owners.length / totalTeams) * 100) : 0,
-        injuryStatus: injuryMap[p.player_id]?.injuryStatus || '',
-        injuryDescription: injuryMap[p.player_id]?.injuryDescription || '',
+        injuryStatus: injuryMap[p.playerId]?.injuryStatus || '',
+        injuryDescription: injuryMap[p.playerId]?.injuryDescription || '',
       }))
       .sort((a, b) => (b.points || 0) - (a.points || 0));
     return json({ players, totalTeams, season: standings.season });
