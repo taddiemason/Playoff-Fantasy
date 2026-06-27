@@ -1008,8 +1008,8 @@ async function handleApi(request, env, pathname) {
     const seasonType = (season_type === 'regular') ? 'regular' : 'playoffs';
     const league = await db
       .prepare(
-        `INSERT INTO leagues (name, owner_user_id, season, season_type, config_json, invite_code)
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING *`
+        `INSERT INTO leagues (name, owner_user_id, season, season_type, config_json, invite_code, phase)
+         VALUES (?, ?, ?, ?, ?, ?, 'pre_draft') RETURNING *`
       )
       .bind(name.trim(), user.id, getCurrentSeason(), seasonType, JSON.stringify(DEFAULT_LEAGUE_CONFIG), generateInviteCode())
       .first();

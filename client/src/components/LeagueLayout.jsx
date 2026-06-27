@@ -55,27 +55,32 @@ export default function LeagueLayout() {
   const showKeepers = league?.league_format && league.league_format !== 'redraft'
   const phaseMsg = league?.phase && league.phase !== 'active' ? PHASE_MESSAGES[league.phase] : null
 
+  const phase = league?.phase || 'active'
+  const isActive = phase === 'active'
+  const isPreDraft = phase === 'pre_draft' || phase === 'supplemental_draft'
+  const isOffseason = phase === 'offseason' || phase === 'keeper_window'
+
   return (
     <div>
       <div className="league-nav">
         <NavLink end to={`/leagues/${leagueId}`} className={({ isActive }) => tab(isActive)}>Home</NavLink>
-        <NavLink to={`/leagues/${leagueId}/standings`} className={({ isActive }) => tab(isActive)}>Standings</NavLink>
-        <NavLink to={`/leagues/${leagueId}/matchup`} className={({ isActive }) => tab(isActive)}>Matchup</NavLink>
-        <NavLink to={`/leagues/${leagueId}/lineup`} className={({ isActive }) => tab(isActive)}>Lineup</NavLink>
-        <NavLink to={`/leagues/${leagueId}/schedule`} className={({ isActive }) => tab(isActive)}>Schedule</NavLink>
-        <NavLink to={`/leagues/${leagueId}/waivers`} className={({ isActive }) => tab(isActive)}>Waivers</NavLink>
-        <NavLink to={`/leagues/${leagueId}/trades`} className={({ isActive }) => tab(isActive)}>Trades</NavLink>
+        {(isActive || isOffseason) && <NavLink to={`/leagues/${leagueId}/standings`} className={({ isActive }) => tab(isActive)}>Standings</NavLink>}
+        {isActive && <NavLink to={`/leagues/${leagueId}/matchup`} className={({ isActive }) => tab(isActive)}>Matchup</NavLink>}
+        {isActive && <NavLink to={`/leagues/${leagueId}/lineup`} className={({ isActive }) => tab(isActive)}>Lineup</NavLink>}
+        {(isActive || isOffseason) && <NavLink to={`/leagues/${leagueId}/schedule`} className={({ isActive }) => tab(isActive)}>Schedule</NavLink>}
+        {isActive && <NavLink to={`/leagues/${leagueId}/waivers`} className={({ isActive }) => tab(isActive)}>Waivers</NavLink>}
+        {isActive && <NavLink to={`/leagues/${leagueId}/trades`} className={({ isActive }) => tab(isActive)}>Trades</NavLink>}
         <NavLink to={`/leagues/${leagueId}/chat`} className={({ isActive }) => tab(isActive)} onClick={() => setChatUnread(false)}>
           Chat{chatUnread && <span className="chat-unread-dot" />}
         </NavLink>
-        <NavLink to={`/leagues/${leagueId}/draft`} className={({ isActive }) => tab(isActive)}>Draft</NavLink>
-        <NavLink to={`/leagues/${leagueId}/auction`} className={({ isActive }) => tab(isActive)}>Auction</NavLink>
-        {showKeepers && (
+        {isPreDraft && <NavLink to={`/leagues/${leagueId}/draft`} className={({ isActive }) => tab(isActive)}>Draft</NavLink>}
+        {isPreDraft && <NavLink to={`/leagues/${leagueId}/auction`} className={({ isActive }) => tab(isActive)}>Auction</NavLink>}
+        {showKeepers && (isPreDraft || isOffseason) && (
           <NavLink to={`/leagues/${leagueId}/keepers`} className={({ isActive }) => tab(isActive)}>Keepers</NavLink>
         )}
         <NavLink to={`/leagues/${leagueId}/rules`} className={({ isActive }) => tab(isActive)}>Rules</NavLink>
         <NavLink to={`/leagues/${leagueId}/players`} className={({ isActive }) => tab(isActive)}>Players</NavLink>
-        <NavLink to={`/leagues/${leagueId}/add-players`} className={({ isActive }) => tab(isActive)}>Add Players</NavLink>
+        {(isActive || isPreDraft) && <NavLink to={`/leagues/${leagueId}/add-players`} className={({ isActive }) => tab(isActive)}>Add Players</NavLink>}
         {isCommissioner && <NavLink to={`/leagues/${leagueId}/admin`} className={({ isActive }) => tab(isActive)}>Manage</NavLink>}
       </div>
       {phaseMsg && (
